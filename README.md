@@ -1,3 +1,83 @@
-# compartmentalise-program
+# Compartmentalise
 
-Initial commit.
+A tiny desktop app for safely sharing code with an AI. Paste your code, mark
+the bits that are secret, and the app swaps every secret for a harmless
+placeholder. Copy the sanitised version into the AI. When the AI replies, paste
+its answer back and the app puts your real secrets back in.
+
+The point: **you never hand your API keys, passwords, hostnames, or anything
+else sensitive to a third-party model.**
+
+## How it works
+
+**Sanitise mode**
+
+1. Paste your code into the left box.
+2. Add the things you want to hide in the **Secrets** section. Each secret has:
+   - a **value** — the real text to hide (`sk-live-abc123`, a password, a
+     hostname…)
+   - a **placeholder** — what the AI sees instead (auto-filled as
+     `__SECRET_1__`; rename it to something meaningful like `__API_KEY__`).
+3. The right box shows the sanitised code, with a count of how many times each
+   secret was hidden. Click **Copy** and paste it into the AI.
+
+Shortcuts:
+- Select text in the code box and press **Ctrl/Cmd + E** to add it as a secret.
+- **Auto-detect** scans the pasted code for things that look like secrets
+  (API keys, tokens, emails, IPs, `password = "…"` assignments, JWTs, URLs with
+  credentials) and adds them for you. Always review what it finds.
+
+**Restore mode**
+
+Paste the AI's reply (placeholders and all) into the left box and your real
+secrets reappear on the right. Keep the app open between the two steps so it
+remembers your secret list.
+
+## Privacy
+
+- Secrets live **only in the app window's memory**. Nothing is written to disk
+  and nothing is sent over the network — the app has no network access at all.
+- Closing the app forgets every secret.
+
+## Running it
+
+**Windows:** double-click **`run.bat`**. It installs dependencies on the first
+run and then launches the app.
+
+To pull the latest version from GitHub and then run, double-click
+**`update.bat`** instead. To keep the folder updated with no clicks at all, see
+[Staying up to date automatically](#staying-up-to-date-automatically).
+
+**Any platform (terminal):**
+
+```bash
+npm install
+npm start
+```
+
+Requires [Node.js](https://nodejs.org/). `npm install` pulls in Electron.
+
+## Staying up to date automatically
+
+The app lives in a GitHub repo. Updates are *pushed* there; your local folder
+*pulls* them. `update.bat` does one pull-and-run. To make it fully hands-off on
+Windows, have Task Scheduler pull on a schedule:
+
+1. Open **Task Scheduler** → **Create Basic Task**.
+2. Name it e.g. "Update Compartmentalise", pick a trigger (**At log on**, or
+   **Daily**/hourly).
+3. Action: **Start a program**.
+   - Program/script: `git`
+   - Add arguments: `pull`
+   - Start in: the full path to this folder, e.g. `C:\Users\you\compartmentalise-program`
+4. Finish.
+
+Now your folder quietly stays current; double-click `run.bat` whenever you want
+to use it, and it'll already be the latest. (Both `git` and the folder having
+been cloned once with `git clone` are required.)
+
+## Building a distributable (optional)
+
+This repo ships only the source. To produce a packaged app, add a packager such
+as [`electron-builder`](https://www.electron.build/) or
+[`@electron-forge/cli`](https://www.electronforge.io/) and follow its docs.

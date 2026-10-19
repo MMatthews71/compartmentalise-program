@@ -1,0 +1,15 @@
+{
+  "name": "compartmentalise",
+  "version": "1.0.0",
+  "description": "A simple desktop app to redact secrets from code before sharing it with an AI, and restore them afterwards.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}
