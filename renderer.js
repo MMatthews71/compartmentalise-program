@@ -23,7 +23,6 @@ const el = (id) => document.getElementById(id);
 const input = el('input');
 const output = el('output');
 const secretsList = el('secrets-list');
-const secretsEmpty = el('secrets-empty');
 const replaceCount = el('replace-count');
 const restoreInput = el('restore-input');
 const restoreOutput = el('restore-output');
@@ -117,7 +116,6 @@ function placeholdersByLength() {
 
 function renderSecrets() {
   secretsList.innerHTML = '';
-  secretsEmpty.classList.toggle('hidden', secrets.length > 0);
 
   for (const secret of secrets) {
     const row = document.createElement('div');
@@ -127,7 +125,6 @@ function renderSecrets() {
     const valueInput = document.createElement('input');
     valueInput.type = 'text';
     valueInput.value = secret.value;
-    valueInput.placeholder = 'e.g. sk-live-abc123…';
     valueInput.spellcheck = false;
     valueInput.addEventListener('input', () => {
       secret.value = valueInput.value;
@@ -138,7 +135,6 @@ function renderSecrets() {
     phInput.type = 'text';
     phInput.className = 'ph-input';
     phInput.value = secret.placeholder;
-    phInput.placeholder = '__SECRET__';
     phInput.spellcheck = false;
     phInput.addEventListener('input', () => {
       secret.placeholder = phInput.value;
@@ -347,9 +343,6 @@ function switchMode(mode) {
 // ---------- wiring ----------
 
 function init() {
-  // reflect the platform in the keyboard hint
-  el('shortcut-hint').textContent = MOD_KEY;
-
   input.addEventListener('input', sanitise);
   restoreInput.addEventListener('input', restore);
 
