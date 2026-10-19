@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; form-action 'none'; base-uri 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Compartmentalise</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">▦</span>
+        <div>
+          <h1>Compartmentalise</h1>
+          <p class="tagline">Strip secrets out of code before you share it with an AI — then put them back.</p>
+        </div>
+      </div>
+      <div class="mode-switch" role="tablist" aria-label="Mode">
+        <button id="tab-sanitise" class="mode-btn active" role="tab" aria-selected="true">
+          Sanitise
+        </button>
+        <button id="tab-restore" class="mode-btn" role="tab" aria-selected="false">
+          Restore
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <!-- ============ SANITISE MODE ============ -->
+      <section id="view-sanitise" class="view">
+        <div class="columns">
+          <!-- Left: original code -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>1 · Paste your code</h2>
+              <div class="panel-actions">
+                <button id="detect-btn" class="btn ghost" title="Scan the code for things that look like secrets">
+                  Auto-detect
+                </button>
+                <button id="clear-input-btn" class="btn ghost">Clear</button>
+              </div>
+            </div>
+            <textarea
+              id="input"
+              class="code"
+              spellcheck="false"
+              placeholder="Paste the code (or any text) you want to share…"
+            ></textarea>
+          </div>
+
+          <!-- Right: output -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>3 · Safe to share</h2>
+              <div class="panel-actions">
+                <span id="replace-count" class="count"></span>
+                <button id="copy-output-btn" class="btn primary">Copy</button>
+              </div>
+            </div>
+            <textarea
+              id="output"
+              class="code"
+              spellcheck="false"
+              readonly
+              placeholder="Your sanitised code appears here, with every secret swapped for a placeholder."
+            ></textarea>
+          </div>
+        </div>
+
+        <!-- Secrets -->
+        <div class="panel secrets-panel">
+          <div class="panel-head">
+            <h2>2 · Secrets to hide</h2>
+            <div class="panel-actions">
+              <span class="hint">Values below are replaced by their placeholder in the output.</span>
+              <button id="add-secret-btn" class="btn ghost">+ Add secret</button>
+              <button id="clear-secrets-btn" class="btn ghost danger">Clear all</button>
+            </div>
+          </div>
+          <div class="secrets-table-wrap">
+            <div class="secrets-head-row">
+              <span class="col-secret">Secret value (what to hide)</span>
+              <span class="col-ph">Placeholder (what the AI sees)</span>
+              <span class="col-hits">Hits</span>
+              <span class="col-del"></span>
+            </div>
+            <div id="secrets-list"></div>
+            <p id="secrets-empty" class="empty-note">
+              No secrets yet. Add one above, or select text in the code and press
+              <kbd id="shortcut-hint">Ctrl</kbd>+<kbd>E</kbd> to hide it.
+            </p>
+          </div>
+          <p class="privacy-note">
+            🔒 Secrets live only in this window's memory. Nothing is written to disk or sent anywhere. Closing the app forgets them.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ RESTORE MODE ============ -->
+      <section id="view-restore" class="view hidden">
+        <div class="restore-intro">
+          <h2>Paste the AI's reply back in</h2>
+          <p>
+            Any placeholders in the text below are swapped back to your real
+            secrets, using the list from Sanitise mode. Keep this app open so it
+            remembers them.
+          </p>
+        </div>
+        <div class="columns">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>AI's response (with placeholders)</h2>
+              <button id="clear-restore-btn" class="btn ghost">Clear</button>
+            </div>
+            <textarea
+              id="restore-input"
+              class="code"
+              spellcheck="false"
+              placeholder="Paste the code the AI gave back, placeholders and all…"
+            ></textarea>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Restored (real secrets)</h2>
+              <div class="panel-actions">
+                <span id="restore-count" class="count"></span>
+                <button id="copy-restore-btn" class="btn primary">Copy</button>
+              </div>
+            </div>
+            <textarea
+              id="restore-output"
+              class="code"
+              spellcheck="false"
+              readonly
+              placeholder="Your real secrets reappear here."
+            ></textarea>
+          </div>
+        </div>
+        <p id="restore-empty-note" class="privacy-note"></p>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
