@@ -41,6 +41,11 @@ remembers your secret list.
 
 ## Running it
 
+**Windows:** double-click **`run.bat`**. It installs dependencies on the first
+run and then launches the app.
+
+**Any platform (terminal):**
+
 ```bash
 npm install
 npm start
