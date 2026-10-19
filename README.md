@@ -44,6 +44,10 @@ remembers your secret list.
 **Windows:** double-click **`run.bat`**. It installs dependencies on the first
 run and then launches the app.
 
+To pull the latest version from GitHub and then run, double-click
+**`update.bat`** instead. To keep the folder updated with no clicks at all, see
+[Staying up to date automatically](#staying-up-to-date-automatically).
+
 **Any platform (terminal):**
 
 ```bash
@@ -52,6 +56,25 @@ npm start
 ```
 
 Requires [Node.js](https://nodejs.org/). `npm install` pulls in Electron.
+
+## Staying up to date automatically
+
+The app lives in a GitHub repo. Updates are *pushed* there; your local folder
+*pulls* them. `update.bat` does one pull-and-run. To make it fully hands-off on
+Windows, have Task Scheduler pull on a schedule:
+
+1. Open **Task Scheduler** → **Create Basic Task**.
+2. Name it e.g. "Update Compartmentalise", pick a trigger (**At log on**, or
+   **Daily**/hourly).
+3. Action: **Start a program**.
+   - Program/script: `git`
+   - Add arguments: `pull`
+   - Start in: the full path to this folder, e.g. `C:\Users\you\compartmentalise-program`
+4. Finish.
+
+Now your folder quietly stays current; double-click `run.bat` whenever you want
+to use it, and it'll already be the latest. (Both `git` and the folder having
+been cloned once with `git clone` are required.)
 
 ## Building a distributable (optional)
 
