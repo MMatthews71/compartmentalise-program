@@ -291,3 +291,13 @@ test('rename only refuses clashes and names that come from elsewhere', () => {
   assert.match(imported.results.get(1).problems[0].reason, /imported/);
   assert.strictEqual(imported.code, 'from x import A\nprint(A)\n');
 });
+
+test('rename only on a name from the secrets module keeps the import working', () => {
+  const out = extract(
+    'from hidden_secrets import contract\nx = {"k": 1}[contract]\n',
+    renameOf(['contract', 'CONTRACT_KEY']),
+    { existingModule: 'contract = "k"\n' }
+  );
+  assert.strictEqual(out.code, 'from hidden_secrets import CONTRACT_KEY\nx = {"k": 1}[CONTRACT_KEY]\n');
+  assert.strictEqual(out.moduleText, 'contract = "k"\n\nCONTRACT_KEY = contract\n');
+});
