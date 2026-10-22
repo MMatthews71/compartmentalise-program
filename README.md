@@ -36,6 +36,7 @@ Each secret has a **name** — what your code uses instead of the real value
 | a complete value `["ts_hk", "active_USD"]`  | `cols = COLS`                         | `COLS = ["ts_hk", …]`       |
 | a whole string `"db.internal"`              | `connect(DB_HOST)`                    | `DB_HOST = "db.internal"`   |
 | part of a string: `abc` in `"abcdef"`       | `f"{SECRET_1}def"`                    | `SECRET_1 = "abc"`          |
+| inside an f-string: `f"{d['active_USD']}"`  | `f"{d[COL]}"`                         | `COL = "active_USD"`        |
 | text in a comment or docstring              | the text is replaced by the name      | the text, for reference     |
 
 Every file that uses a secret gets `from hidden_secrets import …` at the top.
@@ -49,7 +50,8 @@ Matching rules:
   still matches if its indentation differs from what you typed.
 
 If a spot can't be moved without breaking your code (for example a variable
-inside a function, or a name rather than a value), it is **left as it is and
+inside a function, a name rather than a value, or an f-string `{x=}` that
+prints its own code), it is **left as it is and
 listed in red under that secret** so you know the AI will still see it.
 
 ## Keep the secrets file away from the AI

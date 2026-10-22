@@ -103,6 +103,13 @@ test('numbers and None', (t) => {
   check(t, src, secretsOf(['5432']), 1);
 });
 
+test('signed numbers only when they are a value', (t) => {
+  const src = 'a = -5\nb = a + 1\nc = -5 ** 2\nd = [-5, 1]\n';
+  const out = check(t, src, secretsOf(['-5'], ['+ 1']), 2);
+  assert.match(out.code, /^b = a \+ 1$/m);
+  assert.match(out.code, /^c = -5 \*\* 2$/m);
+});
+
 test('unsafe spots are left alone and reported', (t) => {
   const src = 'def f():\n    TOKEN = "abc"\n    return TOKEN\nabc = 2\nd = {"k": 1}\nd["k"]\ny = "\\nabc"\n';
   const out = check(t, src, secretsOf(['TOKEN = "abc"'], ['abc'], ['["k"]']), 2);
@@ -137,4 +144,26 @@ test('implicitly joined strings stay valid', (t) => {
   const src = 'x = ("abc" "def")\n';
   const out = check(t, src, secretsOf(['abc']), 1);
   assert.match(out.code, /f"\{SECRET_1\}" "def"/);
+});
+
+test('secrets inside f-string {expressions}', (t) => {
+  const src = [
+    'd = {"active_USD": 1, "abcdef": 2}',
+    'a = f"{d[\'active_USD\']} total"',
+    'b = f"{d[\'abcdef\']:>5}|{5432 + 1}"',
+    "c = f'{\"abc\" * 2}-abc'",
+    "e = f\"{d['active_USD']=}\"",
+    ''
+  ].join('\n');
+  const out = check(t, src, secretsOf(['active_USD', 'COL'], ['abc'], ['5432', 'PORT']), 7);
+  assert.match(out.code, /^a = f"\{d\[COL\]\} total"$/m);
+  assert.match(out.code, /^b = f"\{d\[f'\{SECRET_2\}def'\]:>5\}\|\{PORT \+ 1\}"$/m);
+  assert.match(out.code, /^c = f'\{SECRET_2 \* 2\}-\{SECRET_2\}'$/m);
+  assert.match(out.code, /^e = f"\{d\['active_USD'\]=\}"$/m, '{x=} prints its own code, so it stays');
+});
+
+test('f-string format specs and conversions are left alone', () => {
+  const out = extract('x = 1\ny = f"{x!r:abc}"\n', secretsOf(['abc']));
+  assert.strictEqual(out.results.get(1).hidden, 0);
+  assert.match(out.results.get(1).problems[0].reason, /f-string/);
 });
