@@ -121,7 +121,7 @@ function registerFileHandlers() {
     return fs.existsSync(secretsPath) ? readText(secretsPath).text : null;
   });
 
-  ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol }) => {
+  ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol, restoring }) => {
     try {
       if (!openedPath || sourcePath !== openedPath) throw new Error('Open the file again before saving');
       const secretsPath = secretsPathFor(sourcePath, moduleName);
@@ -134,10 +134,12 @@ function registerFileHandlers() {
         defaultId: 0,
         cancelId: 1,
         title: 'Save changes',
-        message: 'Move the secrets out and save?',
-        detail:
-          `This overwrites:\n  ${sourcePath}\n     (secrets removed, imports added)\n\n` +
-          `and writes:\n  ${secretsPath}\n     (keep this one away from AI tools)`
+        message: restoring ? 'Put the real names back and save?' : 'Hide the secrets and save?',
+        detail: restoring
+          ? `This overwrites:\n  ${sourcePath}\n     (renamed names changed back)\n\n` +
+            `and updates:\n  ${secretsPath}\n     (the notes about those renames are removed)`
+          : `This overwrites:\n  ${sourcePath}\n     (secrets removed or renamed, imports added)\n\n` +
+            `and writes:\n  ${secretsPath}\n     (keep this one away from AI tools)`
       });
       if (response !== 0) return { canceled: true };
       const toDisk = (text) => (eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text);

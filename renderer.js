@@ -11,11 +11,11 @@
 
 const IS_MAC = navigator.platform.toUpperCase().includes('MAC');
 const MOD_KEY = IS_MAC ? 'Cmd' : 'Ctrl';
-const { extract, suggestName, variableName, isValidName } = window.PyExtract;
+const { extract, restoreNames, renamesFor, suggestName, variableName, isValidName } = window.PyExtract;
 // Only there when running inside the desktop app.
 const fileBridge = window.files || null;
 
-/** @type {{id:number, value:string, name:string}[]} */
+/** @type {{id:number, value:string, name:string, mode:'move'|'rename'}[]} */
 let secrets = [];
 let nextId = 1;
 /** The file opened from disk, if any: { path, eol }. */
@@ -67,12 +67,17 @@ function moduleName() {
   return moduleNameInput.value.trim();
 }
 
+/** The open file's name, as rename notes in the secrets file record it. */
+function fileName() {
+  return openFile ? openFile.path.split(/[\\/]/).pop() : 'this file';
+}
+
 // ---------- secrets model ----------
 
 function addSecret(value = '') {
   const name = suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
   // Newest first, so a freshly added row is always visible at the top.
-  secrets.unshift({ id: nextId++, value, name });
+  secrets.unshift({ id: nextId++, value, name, mode: 'move' });
   renderSecrets();
   secretsList.scrollTop = 0;
   if (!value) secretsList.querySelector('.value-input')?.focus();
@@ -117,9 +122,12 @@ function renderSecrets() {
     nameInput.spellcheck = false;
     const setNameHint = () => {
       const varName = variableName(secret.value, input.value);
-      nameInput.title = varName
-        ? `Your code will say this instead of ${varName}. Type ${varName} itself to keep the name visible.`
-        : 'The name your code will use';
+      nameInput.title =
+        secret.mode === 'rename'
+          ? `The new name your code will use instead of ${secret.value.trim() || 'it'}`
+          : varName
+            ? `Your code will say this instead of ${varName}. Type ${varName} itself to keep the name visible.`
+            : 'The name your code will use';
     };
     setNameHint();
     nameInput.addEventListener('input', () => {
@@ -131,6 +139,22 @@ function renderSecrets() {
       secret.value = valueInput.value;
       setNameHint();
       fitToContent(valueInput);
+      update();
+    });
+
+    // Move the value out to the secrets file, or just give the name a new one.
+    const modeSelect = document.createElement('select');
+    modeSelect.className = 'mode-select';
+    modeSelect.title = 'Move out: the value goes to the secrets file. Rename only: the code stays, under a new name.';
+    for (const [value, label] of [
+      ['move', 'Move out'],
+      ['rename', 'Rename only']
+    ]) {
+      modeSelect.append(new Option(label, value, false, secret.mode === value));
+    }
+    modeSelect.addEventListener('change', () => {
+      secret.mode = modeSelect.value;
+      setNameHint();
       update();
     });
 
@@ -146,7 +170,7 @@ function renderSecrets() {
     const note = document.createElement('div');
     note.className = 'row-note hidden';
 
-    row.append(valueInput, nameInput, hits, del, note);
+    row.append(valueInput, modeSelect, nameInput, hits, del, note);
     secretsList.append(row);
     fitToContent(valueInput);
   }
@@ -183,7 +207,7 @@ function update() {
   moduleNameInput.classList.toggle('invalid', !nameOk);
   el('module-file-name').textContent = `${name || '?'}.py`;
 
-  lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule });
+  lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule, fileName: fileName() });
   output.value = lastResult.code;
   moduleOutput.value = lastResult.moduleText;
   updateRows(lastResult.results);
@@ -203,11 +227,13 @@ function update() {
     replaceCount.textContent = 'no matches found';
     replaceCount.style.color = 'var(--text-faint)';
   } else {
-    replaceCount.textContent = `${moved} moved` + (visible ? ` · ${visible} left visible` : '');
+    replaceCount.textContent = `${moved} hidden` + (visible ? ` · ${visible} left visible` : '');
     replaceCount.style.color = visible ? 'var(--danger)' : 'var(--good)';
   }
 
   el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
+  el('restore-names-btn').disabled =
+    !fileBridge || !openFile || !nameOk || renamesFor(existingModule, fileName()).length === 0;
 }
 
 // ---------- files ----------
@@ -258,14 +284,42 @@ async function save() {
     showToast(`Couldn't save: ${result.error}`);
     return;
   }
-  const moved = [...lastResult.results.values()].reduce((n, r) => n + r.hidden, 0);
+  const changed = [...lastResult.results.values()].reduce((n, r) => n + r.hidden, 0);
   // The file on disk is now the safe version; carry on from there.
   input.value = lastResult.code;
   existingModule = lastResult.moduleText;
   secrets = [];
   renderSecrets();
   update();
-  showToast(`Saved — ${moved} ${moved === 1 ? 'secret' : 'secrets'} moved to ${moduleName()}.py`);
+  showToast(`Saved — ${changed} ${changed === 1 ? 'change' : 'changes'}, secrets in ${moduleName()}.py`);
+}
+
+/** Undo the renames noted in the secrets file for this file, and save. */
+async function putNamesBack() {
+  if (!fileBridge || !openFile) return;
+  const result = restoreNames(input.value, existingModule, { moduleName: moduleName(), fileName: fileName() });
+  const stuck = result.renames.filter((r) => result.results.get(r.id).problems.length);
+  const saved = await fileBridge.save({
+    sourcePath: openFile.path,
+    sourceText: result.code,
+    moduleName: moduleName(),
+    secretsText: result.moduleText,
+    eol: openFile.eol,
+    restoring: true
+  });
+  if (saved.canceled) return;
+  if (saved.error) {
+    showToast(`Couldn't save: ${saved.error}`);
+    return;
+  }
+  input.value = result.code;
+  existingModule = result.moduleText;
+  update();
+  showToast(
+    stuck.length
+      ? `Names put back, except ${stuck.map((r) => r.value).join(', ')} — that name is in use now`
+      : 'Names put back'
+  );
 }
 
 // ---------- auto-detect ----------
@@ -372,6 +426,7 @@ function init() {
   el('detect-btn').addEventListener('click', autoDetect);
   el('open-btn').addEventListener('click', openFromDisk);
   el('save-btn').addEventListener('click', save);
+  el('restore-names-btn').addEventListener('click', putNamesBack);
 
   el('clear-input-btn').addEventListener('click', () => {
     input.value = '';
