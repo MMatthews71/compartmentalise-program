@@ -28,11 +28,18 @@ or anything else sensitive to a third-party model.**
 Each secret has a **name** — what your code uses instead of the real value
 (auto-filled as `SECRET_1`, `SECRET_2`…; rename it to something meaningful).
 
+For a variable, the name is what the AI sees **instead of the variable's own
+name**: give `MONTH_CODES` the name `CODES` and every use in your file becomes
+`CODES` — the words "month codes" never appear. Comments that mention it say
+`CODES` too. The secrets file keeps your real name, so it still makes sense to
+you. Want the variable's name left visible? Give it its own name as the name.
+This works on variables moved by an earlier save, too.
+
 ### What gets moved, and how
 
 | You mark…                                   | Your file becomes…                    | `hidden_secrets.py` gets…   |
 | ------------------------------------------- | ------------------------------------- | --------------------------- |
-| a variable's name on its own: `MONTH_CODES` | its definition is removed; uses stay  | `MONTH_CODES = {…}`         |
+| a variable's name on its own: `MONTH_CODES` | definition removed; every use renamed to `CODES` | `MONTH_CODES = {…}` and `CODES = MONTH_CODES` |
 | a whole top-level variable `API_KEY = "sk…"` | the line is removed                   | `API_KEY = "sk…"`           |
 | a complete value `["ts_hk", "active_USD"]`  | `cols = COLS`                         | `COLS = ["ts_hk", …]`       |
 | a whole string `"db.internal"`              | `connect(DB_HOST)`                    | `DB_HOST = "db.internal"`   |

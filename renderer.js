@@ -70,7 +70,7 @@ function moduleName() {
 // ---------- secrets model ----------
 
 function addSecret(value = '') {
-  const name = variableName(value, input.value) || suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
+  const name = suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
   // Newest first, so a freshly added row is always visible at the top.
   secrets.unshift({ id: nextId++, value, name });
   renderSecrets();
@@ -110,14 +110,18 @@ function renderSecrets() {
     valueInput.value = secret.value;
     valueInput.spellcheck = false;
 
-    // A whole variable keeps its own name, so it's not editable.
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
     nameInput.className = 'ph-input';
     nameInput.value = secret.name;
     nameInput.spellcheck = false;
-    nameInput.readOnly = Boolean(variableName(secret.value, input.value));
-    nameInput.title = nameInput.readOnly ? 'A whole variable keeps its own name' : 'The name your code will use';
+    const setNameHint = () => {
+      const varName = variableName(secret.value, input.value);
+      nameInput.title = varName
+        ? `Your code will say this instead of ${varName}. Type ${varName} itself to keep the name visible.`
+        : 'The name your code will use';
+    };
+    setNameHint();
     nameInput.addEventListener('input', () => {
       secret.name = nameInput.value;
       update();
@@ -125,12 +129,7 @@ function renderSecrets() {
 
     valueInput.addEventListener('input', () => {
       secret.value = valueInput.value;
-      const varName = variableName(secret.value, input.value);
-      if (varName) {
-        secret.name = varName;
-        nameInput.value = varName;
-      }
-      nameInput.readOnly = Boolean(varName);
+      setNameHint();
       fitToContent(valueInput);
       update();
     });

@@ -42,13 +42,15 @@ print(json.dumps([values(${JSON.stringify(path.join(dir, 'original.py'))}), valu
   return [a, b];
 }
 
-function check(t, src, secrets, expectHidden) {
+function check(t, src, secrets, expectHidden, renamed = {}) {
   const out = extract(src, secrets);
   const hidden = [...out.results.values()].reduce((n, r) => n + r.hidden, 0);
   assert.strictEqual(hidden, expectHidden, JSON.stringify([...out.results.values()]));
   if (python) {
     const [before, after] = runBoth(src, out);
-    // Names imported from the secrets module are extra; compare the rest.
+    // A renamed variable is compared under its new name; names imported
+    // from the secrets module are extra, so compare the rest.
+    for (const [from, to] of Object.entries(renamed)) after[from] = after[to];
     for (const k of Object.keys(after)) if (!(k in before)) delete after[k];
     assert.deepStrictEqual(after, before, `rewritten:\n${out.code}\n--- module:\n${out.moduleText}`);
   } else t.diagnostic('python not found — skipped running the code');
@@ -180,7 +182,7 @@ test('a variable name on its own moves its whole definition', (t) => {
     'label = f"{MONTH_CODES[1]} of {len(MONTH_CODES)}"',
     ''
   ].join('\n');
-  const out = check(t, src, secretsOf(['MONTH_CODES'], ['LOOKUP'], ['ROOT']), 1);
+  const out = check(t, src, secretsOf(['MONTH_CODES', 'MONTH_CODES'], ['LOOKUP', 'LOOKUP'], ['ROOT', 'ROOT']), 1);
   assert.match(out.code, /^from hidden_secrets import MONTH_CODES$/m);
   assert.match(out.code, /^label = f"\{MONTH_CODES\[1\]\} of \{len\(MONTH_CODES\)\}"$/m, 'uses stay as they are');
   assert.match(out.moduleText, /^MONTH_CODES = \{\n    1: "F", 2: "G", 3: "H",  # winter\n\}$/m);
@@ -191,14 +193,55 @@ test('a variable name on its own moves its whole definition', (t) => {
 
 test('dependencies move together, with the imports they need', (t) => {
   const src = 'import math\nfrom os import path as p\nn = 12\nLOOKUP = dict(zip(range(n), "FGHJKMNQUVXZ"))\nROOT = math.sqrt(n)\nSEP = p.sep\nboth = (LOOKUP, ROOT, SEP)\n';
-  const out = check(t, src, secretsOf(['LOOKUP'], ['ROOT'], ['n'], ['SEP']), 4);
+  const out = check(t, src, secretsOf(['LOOKUP', 'LOOKUP'], ['ROOT', 'ROOT'], ['n', 'n'], ['SEP', 'SEP']), 4);
   assert.match(out.code, /^from hidden_secrets import n, LOOKUP, ROOT, SEP$/m);
   assert.match(out.moduleText, /\nn = 12\nLOOKUP = dict\(zip\(range\(n\), "FGHJKMNQUVXZ"\)\)\nimport math\nROOT = math.sqrt\(n\)\nfrom os import path as p\nSEP = p.sep\n$/);
 });
 
 test('variables set more than once, or earlier in a block, stay put', () => {
-  const twice = extract('X = 1\nX = 2\n', secretsOf(['X']));
+  const twice = extract('X = 1\nX = 2\n', secretsOf(['X', 'X']));
   assert.match(twice.results.get(1).problems[0].reason, /more than once/);
-  const earlier = extract('if True:\n    X = 0\nX = 1\n', secretsOf(['X']));
+  const earlier = extract('if True:\n    X = 0\nX = 1\n', secretsOf(['X', 'X']));
   assert.match(earlier.results.get(1).problems[0].reason, /set earlier/);
+});
+
+test('a renamed variable never shows its real name', (t) => {
+  const src = [
+    'MONTH_CODES = {1: "F", 2: "G"}  # CME month codes',
+    '',
+    'def code_for(m):',
+    '    # look m up in MONTH_CODES',
+    '    return MONTH_CODES[m]',
+    '',
+    'label = f"{MONTH_CODES[1]} of {len(MONTH_CODES)}"',
+    'title = "MONTH_CODES"',
+    'first = code_for(2)',
+    ''
+  ].join('\n');
+  const out = check(t, src, secretsOf(['MONTH_CODES', 'CODES']), 6, { MONTH_CODES: 'CODES' });
+  assert.ok(!out.code.includes('MONTH_CODES'), out.code);
+  assert.match(out.code, /^from hidden_secrets import CODES, CODES_NAME$/m);
+  assert.match(out.code, /^label = f"\{CODES\[1\]\} of \{len\(CODES\)\}"$/m);
+  assert.match(out.code, /# look m up in CODES/);
+  assert.match(out.moduleText, /\nMONTH_CODES = \{1: "F", 2: "G"\}  # CME month codes\nCODES = MONTH_CODES\nCODES_NAME = "MONTH_CODES"\n$/);
+});
+
+test('renaming a variable moved by an earlier save', () => {
+  const out = extract(
+    'from hidden_secrets import MONTH_CODES\nx = MONTH_CODES[1]\n',
+    secretsOf(['MONTH_CODES', 'CODES']),
+    { existingModule: 'MONTH_CODES = {1: "F"}\n' }
+  );
+  assert.strictEqual(out.code, 'from hidden_secrets import CODES\nx = CODES[1]\n');
+  assert.strictEqual(out.moduleText, 'MONTH_CODES = {1: "F"}\n\nCODES = MONTH_CODES\n');
+});
+
+test('names that must stay are reported, and {x=} blocks a rename', () => {
+  const kept = extract('X = 1\nclass C:\n    X = 2\nc = C.X\nd = dict(X=3)\n', secretsOf(['X', 'Y']));
+  const reasons = kept.results.get(1).problems.map((p) => p.reason).join('; ');
+  assert.match(reasons, /attribute name here/);
+  assert.match(reasons, /keyword argument here/);
+  const debug = extract('X = 1\ny = f"{X=}"\n', secretsOf(['X', 'Y']));
+  assert.strictEqual(debug.results.get(1).hidden, 0);
+  assert.match(debug.results.get(1).problems[0].reason, /printed by an f-string/);
 });
