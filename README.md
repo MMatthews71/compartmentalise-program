@@ -21,6 +21,10 @@ else sensitive to a third-party model.**
 3. The right box shows the sanitised code, with a count of how many times each
    secret was hidden. Click **Copy** and paste it into the AI.
 
+Secrets match **whole words only**: a secret `abc` hides `abc` on its own (or
+in `x.abc` / `"abc"`), but leaves the first three letters of `abcd` alone.
+Newly added secrets appear at the top of the list.
+
 Shortcuts:
 - Select text in the code box and press **Ctrl/Cmd + E** to add it as a secret.
 - **Auto-detect** scans the pasted code for things that look like secrets

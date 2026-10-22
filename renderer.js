@@ -35,10 +35,23 @@ function escapeRegExp(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Replace every occurrence of `find` with `replace`, returning text + count. */
-function replaceAllCounted(text, find, replace) {
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/** Regex source matching `find` only as a whole word: if it starts (or ends)
+ *  with a letter, digit or underscore, the neighbouring character must not be
+ *  one. So "abc" matches in "x = abc;" but not inside "abcd" or "xabc". */
+function wholeWordSource(find) {
+  const before = WORD_CHAR.test(find[0]) ? '(?<![\\p{L}\\p{N}_])' : '';
+  const after = WORD_CHAR.test(find[find.length - 1]) ? '(?![\\p{L}\\p{N}_])' : '';
+  return before + escapeRegExp(find) + after;
+}
+
+/** Replace every occurrence of `find` with `replace`, returning text + count.
+ *  With `wholeWord`, occurrences embedded in a longer word are left alone. */
+function replaceAllCounted(text, find, replace, wholeWord = false) {
   if (!find) return { text, count: 0 };
-  const re = new RegExp(escapeRegExp(find), 'g');
+  const source = wholeWord ? wholeWordSource(find) : escapeRegExp(find);
+  const re = new RegExp(source, 'gu');
   let count = 0;
   const result = text.replace(re, () => {
     count += 1;
@@ -78,8 +91,11 @@ async function copyText(text, label) {
 
 function addSecret(value = '', placeholder = '') {
   const ph = placeholder || `__SECRET_${nextPlaceholderNum++}__`;
-  secrets.push({ id: nextId++, value, placeholder: ph });
+  // Newest first, so a freshly added row is always visible at the top.
+  secrets.unshift({ id: nextId++, value, placeholder: ph });
   renderSecrets();
+  secretsList.scrollTop = 0;
+  if (!value) secretsList.querySelector('input')?.focus();
   sanitise();
 }
 
@@ -177,7 +193,7 @@ function sanitise() {
   let total = 0;
 
   for (const secret of secretsByValueLength()) {
-    const { text: next, count } = replaceAllCounted(text, secret.value, secret.placeholder);
+    const { text: next, count } = replaceAllCounted(text, secret.value, secret.placeholder, true);
     text = next;
     hitMap.set(secret.id, count);
     total += count;
