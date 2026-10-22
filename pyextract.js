@@ -462,6 +462,20 @@
     return `from ${moduleName} import (\n${names.map((n) => `    ${n},`).join('\n')}\n)`;
   }
 
+  /** Names the file imports from the secrets module (from an earlier save). */
+  function moduleImportNames(src, tokens, moduleName) {
+    const names = new Set();
+    const re = new RegExp(`^from[ \\t]+${escapeRegExp(moduleName)}[ \\t]+import[ \\t]+(\\([^)]*\\)|[^\\n#]*)`, 'gm');
+    for (const m of src.matchAll(re)) {
+      if (tokenIndexAt(tokens, m.index) !== -1) continue;
+      for (const entry of m[1].replace(/[()]/g, '').split(',')) {
+        const parts = entry.trim().split(/\s+as\s+/);
+        if (parts[0]) names.add(parts[0]);
+      }
+    }
+    return names;
+  }
+
   /** Add `names` to the file's `from <module> import …`, creating it if needed. */
   function addImport(src, moduleName, names) {
     if (names.length === 0) return src;
@@ -666,6 +680,7 @@
       const m = /^(?:async\s+)?def\s+(\w+)|^class\s+(\w+)/.exec(src.slice(st.s, st.e));
       if (m) definedHere.add(m[1] || m[2]);
     }
+    const fromModule = moduleImportNames(src, tokens, moduleName);
     const variables = [];
     const others = [];
     for (const secret of secrets.filter((x) => x.value.trim())) {
@@ -673,30 +688,71 @@
       const statementForm = ASSIGN_RE.exec(value);
       const name = isValidName(value) ? value : statementForm ? statementForm[1] : '';
       const defs = assigns.filter((a) => a.name === name);
-      if (defs.length === 0) {
+      // Moved by an earlier save: nothing to move, but it can still be renamed.
+      const alreadyMoved = defs.length === 0 && moduleDefs.has(name) && fromModule.has(name);
+      if (defs.length === 0 && !alreadyMoved) {
         others.push(secret);
         continue;
       }
       const result = { hidden: 0, problems: [] };
       results.set(secret.id, result);
-      const a = defs[0];
-      const v = { result, name, a, deps: new Set(), problem: '' };
+      const a = defs[0] || null;
+      // What the AI sees instead: the secret's name, if it differs.
+      const alias = secret.name.trim() || name;
+      const v = { secret, result, name, alias, a, deps: new Set(), problem: '', renames: [], visible: [] };
       variables.push(v);
-      // Set earlier inside an if/for/try block? Then moving the top-level
-      // one to the very start would change which value wins.
-      const indentedSet = new RegExp(`^[ \\t]+${name}[ \\t]*(?::[^=\\n]*)?=(?!=)`, 'gm');
-      const setEarlier = [...src.slice(0, a.s).matchAll(indentedSet)].some((x) => locate(tokens, x.index).k === -1);
-      const code = codeOnly(src, tokens, a.valueAt, a.e);
       if (variables.some((x) => x !== v && x.name === name)) v.problem = 'is the same variable as another secret';
-      else if (defs.length > 1) v.problem = `${name} is set more than once at the top level, so it can't be moved`;
-      else if (setEarlier) v.problem = `${name} is also set earlier in the file, so moving it would change things`;
-      else if (statementForm && normaliseExpr(value) !== normaliseExpr(src.slice(a.s, a.e))) {
-        v.problem = "isn't the whole statement — select all of it, or just type the variable's name";
-      } else if ((v.problem = valueShapeProblem(code))) v.problem = `${name} ${v.problem}`;
-      else if (moduleDefs.has(name) && moduleDefs.get(name) !== normaliseExpr(src.slice(a.valueAt, a.e))) {
-        v.problem = `${name} is already in ${moduleName}.py with a different value`;
+      else if (!isValidName(alias)) v.problem = `"${alias}" isn't a valid Python name`;
+      else if (variables.some((x) => x !== v && x.alias === alias)) v.problem = `"${alias}" is the name of another secret too`;
+      else if (alias !== name && codeNames.has(alias)) v.problem = `"${alias}" is already used in this file — pick another name`;
+      else if (alias !== name && moduleDefs.has(alias) && moduleDefs.get(alias) !== name) {
+        v.problem = `"${alias}" is already in ${moduleName}.py with a different value`;
+      } else if (alreadyMoved && alias === name) {
+        v.problem = `is already in ${moduleName}.py — give it a different name to hide the name too`;
       }
-      v.deps = freeNames(code);
+      if (a && !v.problem) {
+        // Set earlier inside an if/for/try block? Then moving the top-level
+        // one to the very start would change which value wins.
+        const indentedSet = new RegExp(`^[ \\t]+${name}[ \\t]*(?::[^=\\n]*)?=(?!=)`, 'gm');
+        const setEarlier = [...src.slice(0, a.s).matchAll(indentedSet)].some((x) => locate(tokens, x.index).k === -1);
+        const code = codeOnly(src, tokens, a.valueAt, a.e);
+        if (defs.length > 1) v.problem = `${name} is set more than once at the top level, so it can't be moved`;
+        else if (setEarlier) v.problem = `${name} is also set earlier in the file, so moving it would change things`;
+        else if (statementForm && normaliseExpr(value) !== normaliseExpr(src.slice(a.s, a.e))) {
+          v.problem = "isn't the whole statement — select all of it, or just type the variable's name";
+        } else if ((v.problem = valueShapeProblem(code))) v.problem = `${name} ${v.problem}`;
+        else if (moduleDefs.has(name) && moduleDefs.get(name) !== normaliseExpr(src.slice(a.valueAt, a.e))) {
+          v.problem = `${name} is already in ${moduleName}.py with a different value`;
+        }
+        v.deps = freeNames(code);
+      }
+      if (alias !== name && !v.problem) findRenames(v);
+    }
+
+    /** Where variable v's name appears in code, to be renamed to its alias.
+     *  Strings and comments are left to the text search below. */
+    function findRenames(v) {
+      for (const m of src.matchAll(new RegExp(`(?<![\\w])${v.name}(?![\\w])`, 'g'))) {
+        const at = m.index;
+        const loc = locate(tokens, at);
+        if (loc.k !== -1 || (v.a && at >= v.a.s && at < v.a.e)) continue;
+        if (loc.field && loc.field.debug) {
+          v.problem = `${v.name} is printed by an f-string {…=} on line ${lineOf(at)}, so it can't be renamed`;
+          return;
+        }
+        const lineStart = src.lastIndexOf('\n', at - 1) + 1;
+        const line = src.slice(lineStart, src.indexOf('\n', at) === -1 ? src.length : src.indexOf('\n', at));
+        const fromElsewhere = /^\s*(?:from\s+(\S+)\s+)?import\b/.exec(line);
+        if (fromElsewhere && fromElsewhere[1] !== moduleName) {
+          v.problem = `${v.name} is imported on line ${lineOf(at)}, so it can't be renamed`;
+          return;
+        }
+        const prev = src.slice(0, at).replace(/\s+$/, '').slice(-1);
+        if (prev === '.') v.visible.push({ at, reason: `${v.name} is an attribute name here, so it stays` });
+        else if ('(,'.includes(prev) && /^\s*=(?!=)/.test(src.slice(at + v.name.length))) {
+          v.visible.push({ at, reason: `${v.name} is a keyword argument here, so it stays` });
+        } else v.renames.push(at);
+      }
     }
     // A definition can only move if everything it uses will exist in the
     // module too: builtins, copied imports, or other variables moving with it.
@@ -718,28 +774,44 @@
         changed = true;
       }
     }
+    const moved = variables.filter((v) => !v.problem);
     for (const v of variables) {
-      if (v.problem) {
-        v.result.problems.push({ line: lineOf(v.a.s), reason: v.problem });
-        continue;
-      }
+      if (v.problem) v.result.problems.push({ line: lineOf(v.a ? v.a.s : 0), reason: v.problem });
+    }
+    for (const v of moved.filter((x) => x.a)) {
       const needs = [...v.deps].filter((d) => !moduleDefs.has(d) && imports.get(d)).map((d) => imports.get(d));
       const key = normaliseExpr(src.slice(v.a.valueAt, v.a.e));
       allocate(v.name, key, () => src.slice(v.a.s, v.a.e), true, v.a.s, needs);
       edits.push({ s: v.a.s, e: src[v.a.e] === '\n' ? v.a.e + 1 : v.a.e, text: '' });
-      imported.add(v.name);
       consumed.push([v.a.s, v.a.e]);
       v.result.hidden = 1;
+    }
+    // Renamed variables: the module keeps the real name and adds
+    // `ALIAS = NAME`; the file only ever says ALIAS.
+    for (const v of moved) {
+      imported.add(v.alias);
+      for (const x of v.visible) v.result.problems.push({ line: lineOf(x.at), reason: x.reason });
+      if (v.alias === v.name) continue;
+      allocate(v.alias, v.name, () => `${v.alias} = ${v.name}`, true, (v.a ? v.a.s : 0) + 0.5);
+      for (const at of v.renames) {
+        if (overlaps(at, at + v.name.length)) continue; // inside a moved definition
+        edits.push({ s: at, e: at + v.name.length, text: v.alias });
+        consumed.push([at, at + v.name.length]);
+        v.result.hidden++;
+      }
+      // Mentions in strings and comments go through the text search below.
+      others.push({ id: v.secret.id, value: v.name, name: v.alias, mentionOf: v, result: v.result });
     }
 
     const ordered = others.sort((a, b) => b.value.trim().length - a.value.trim().length);
 
     for (const secret of ordered) {
-      const result = { hidden: 0, problems: [] };
+      const result = secret.result || { hidden: 0, problems: [] };
       results.set(secret.id, result);
       const value = secret.value.trim();
       const problem = (pos, reason) => result.problems.push({ line: lineOf(pos), reason });
-      const base = secret.name.trim();
+      // A renamed variable's name in a string becomes ALIAS_NAME = "NAME".
+      const base = secret.mentionOf ? `${secret.name}_NAME` : secret.name.trim();
       const nameOk = isValidName(base);
 
       const candidates = [];
@@ -749,7 +821,7 @@
       const tail = WORD_CHAR.test(value[value.length - 1]) ? '(?![\\p{L}\\p{N}_])' : '';
       const codeRe = new RegExp(lead + body + tail, 'gu');
       let m;
-      while ((m = codeRe.exec(src)) !== null) {
+      while (!secret.mentionOf && (m = codeRe.exec(src)) !== null) {
         if (m[0].length === 0) {
           codeRe.lastIndex++;
           continue;
@@ -779,7 +851,7 @@
         if (t && end <= t.contentEnd && at >= t.contentStart) {
           const where = t.type === 'string' && scope === tokens && docstrings.has(k) ? 'docstring' : t.type;
           candidates.push({ s: at, e: end, where, scope, k, field });
-        } else if (k !== -1 || last.k !== -1 || last.tokens !== scope || last.field !== field) {
+        } else if (!secret.mentionOf && (k !== -1 || last.k !== -1 || last.tokens !== scope || last.field !== field)) {
           // Crosses the edge of a string or comment. (Plain code is the
           // whole-word search above; part of a longer name is left alone.)
           candidates.push({ s: at, e: end, where: 'partial' });
@@ -850,6 +922,13 @@
           }
         }
 
+        if (secret.mentionOf && c.where !== 'string') {
+          // A comment or docstring just says the alias instead.
+          edits.push({ s: c.s, e: c.e, text: secret.name });
+          consumed.push([c.s, c.e]);
+          result.hidden++;
+          continue;
+        }
         if (!nameOk) {
           problem(c.s, base ? `"${base}" isn't a valid Python name` : 'needs a name');
           continue;
