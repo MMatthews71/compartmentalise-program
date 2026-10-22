@@ -10,7 +10,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { extract } = require('../pyextract.js');
+const { extract, restoreNames } = require('../pyextract.js');
 
 let python = null;
 for (const cmd of ['python3', 'python']) {
@@ -244,4 +244,50 @@ test('names that must stay are reported, and {x=} blocks a rename', () => {
   const debug = extract('X = 1\ny = f"{X=}"\n', secretsOf(['X', 'Y']));
   assert.strictEqual(debug.results.get(1).hidden, 0);
   assert.match(debug.results.get(1).problems[0].reason, /printed by an f-string/);
+});
+
+const renameOf = (...pairs) => pairs.map(([value, name], i) => ({ id: i + 1, value, name, mode: 'rename' }));
+
+test('rename only: the code stays, under the new name', (t) => {
+  const src = [
+    'MONTH_CODES = {"JAN": "F", "MAY": "K", "SEP": "U"}  # CME',
+    '',
+    'class Book:',
+    '    MONTH_CODES = MONTH_CODES',
+    '    def code(self, m, MONTH_CODES=None):',
+    '        """Look m up in MONTH_CODES."""',
+    '        return (MONTH_CODES or self.MONTH_CODES)[m]',
+    '',
+    'first = Book().code("MAY")',
+    'other = Book().code("JAN", MONTH_CODES={"JAN": "x"})',
+    'label = f"{len(MONTH_CODES)} codes"',
+    'title = "MONTH_CODES"',
+    ''
+  ].join('\n');
+  const out = check(t, src, renameOf(['MONTH_CODES', 'CODES']), 9, { MONTH_CODES: 'CODES' });
+  assert.match(out.code, /^CODES = \{"JAN": "F", "MAY": "K", "SEP": "U"\}  # CME$/m, 'definition stays in the file');
+  assert.match(out.code, /return \(CODES or self\.CODES\)\[m\]/);
+  assert.match(out.code, /Book\(\)\.code\("JAN", CODES=\{"JAN": "x"\}\)/, 'its own keyword argument is renamed too');
+  assert.match(out.code, /^title = "MONTH_CODES"$/m, 'strings keep their text');
+  assert.doesNotMatch(out.code, /import/);
+  assert.match(out.moduleText, /^# Renamed in this file: MONTH_CODES -> CODES$/m);
+  assert.match(out.results.get(1).problems[0].reason, /inside a string/);
+});
+
+test('put names back undoes a rename exactly', () => {
+  const src = 'MONTH_CODES = {"JAN": "F"}\n# uses MONTH_CODES\nx = MONTH_CODES["JAN"]\ndef f(MONTH_CODES):\n    return MONTH_CODES\ny = f(MONTH_CODES=2)\n';
+  const out = extract(src, renameOf(['MONTH_CODES', 'CODES']), { fileName: 'a.py' });
+  // ...the AI edits the file, using the name it sees...
+  const edited = out.code + 'z = len(CODES)\n';
+  const back = restoreNames(edited, out.moduleText, { fileName: 'a.py' });
+  assert.strictEqual(back.code, src + 'z = len(MONTH_CODES)\n');
+  assert.doesNotMatch(back.moduleText, /Renamed/);
+});
+
+test('rename only refuses clashes and names that come from elsewhere', () => {
+  const clash = extract('A = 1\nB = 2\n', renameOf(['A', 'B']));
+  assert.match(clash.results.get(1).problems[0].reason, /already used/);
+  const imported = extract('from x import A\nprint(A)\n', renameOf(['A', 'C']));
+  assert.match(imported.results.get(1).problems[0].reason, /imported/);
+  assert.strictEqual(imported.code, 'from x import A\nprint(A)\n');
 });

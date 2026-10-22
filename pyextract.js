@@ -625,6 +625,102 @@
     return '';
   }
 
+  // ---------- renaming ----------
+
+  // Attribute names of built-in types: renaming a method of our own with one
+  // of these names would also rename calls like some_dict.items().
+  const BUILTIN_ATTRS = new Set(
+    ('append add capitalize clear copy count decode discard encode endswith extend find format fromkeys get ' +
+      'index insert isdigit items join keys lower lstrip pop popitem real imag remove replace reverse rsplit ' +
+      'rstrip setdefault sort split splitlines startswith strip title union update upper values').split(' ')
+  );
+
+  /** Whether `name` is bound somewhere in this file — assigned, defined,
+   *  imported, a parameter or a loop variable — rather than being a builtin
+   *  or coming from elsewhere. */
+  function bindsName(src, tokens, name) {
+    const binders = [
+      // name = …, name: int = …, a, name = … (at the start of a line; f(name=…) isn't one)
+      `^[ \\t]*(?:[\\w \\t,()\\[\\]*.]*[ \\t,(\\[*])?${name}(?!\\w)[\\w \\t,()\\[\\]*.]*?(?::[^=\\n]*)?=(?!=)`,
+      `\\b(?:def|class)\\s+${name}\\b`,
+      `\\bfor[ \\t]+[\\w \\t,()]*\\b${name}\\b[\\w \\t,()]*\\bin\\b`,
+      `\\bas\\s+${name}\\b`,
+      `\\bimport\\s+[^\\n]*\\b${name}\\b`,
+      `\\b(?:def\\s+\\w+\\s*\\(|lambda\\b)[^:]*?\\b${name}\\b`,
+      `\\b${name}\\s*:=`,
+      `\\bglobal\\s+[^\\n]*\\b${name}\\b`
+    ];
+    return binders.some((b) => [...src.matchAll(new RegExp(b, 'gm'))].some((m) => locate(tokens, m.index).k === -1));
+  }
+
+  /** Whether this file defines `name` as something reached with a dot or
+   *  passed by keyword — a method, class attribute, self.name, parameter or
+   *  dataclass field — so `.name` and `name=` uses are ours to rename too. */
+  function definesMember(src, name) {
+    const member = new RegExp(
+      `^[ \\t]+(?:(?:async\\s+)?def\\s+|class\\s+)${name}\\b|^[ \\t]+${name}[ \\t]*[:=](?!=)|\\.${name}\\s*=(?!=)`,
+      'm'
+    );
+    const param = new RegExp(`\\b(?:def\\s+\\w+\\s*\\(|lambda\\b)[^:]*?\\b${name}\\b`);
+    return { attribute: member.test(src), keyword: member.test(src) || param.test(src) };
+  }
+
+  /** Every place identifier `name` appears. Returns { code: [pos],
+   *  text: [{ at, kind: 'comment' | 'docstring' | 'string' }], visible:
+   *  [{ at, reason }] for uses that must keep the name, and problem: why it
+   *  can't be renamed at all ('' if it can). `members` says whether `.name`
+   *  and `name=` uses get renamed (see definesMember). */
+  function nameSites(src, tokens, docstrings, name, moduleName, members = {}) {
+    const sites = { code: [], text: [], visible: [], problem: '' };
+    const lineOf = (pos) => src.slice(0, pos).split('\n').length;
+    const stmts = statements(src, tokens);
+    // How many brackets are open at `at` (counting from its statement, or
+    // its f-string field) — a keyword argument is always inside a call.
+    const depthAt = (at, loc) => {
+      const from = loc.field ? loc.field.start : (stmts.find((x) => x.s <= at && at < x.e) || { s: 0 }).s;
+      let depth = 0;
+      walk(src, loc.tokens, from, at, (i) => {
+        if ('([{'.includes(src[i])) depth++;
+        else if (')]}'.includes(src[i])) depth--;
+      }, () => {});
+      return depth;
+    };
+    for (const m of src.matchAll(new RegExp(`(?<![\\w])${name}(?![\\w])`, 'g'))) {
+      const at = m.index;
+      const loc = locate(tokens, at);
+      if (loc.k !== -1) {
+        const t = loc.tokens[loc.k];
+        const doc = loc.tokens === tokens && docstrings.has(loc.k);
+        sites.text.push({ at, kind: t.type === 'comment' ? 'comment' : doc ? 'docstring' : 'string' });
+        continue;
+      }
+      if (loc.field && loc.field.debug) {
+        sites.problem = `${name} is printed by an f-string {…=} on line ${lineOf(at)}, so it can't be renamed`;
+        return sites;
+      }
+      const lineStart = src.lastIndexOf('\n', at - 1) + 1;
+      const nl = src.indexOf('\n', at);
+      const fromElsewhere = /^\s*(?:from\s+(\S+)\s+)?import\b/.exec(src.slice(lineStart, nl === -1 ? src.length : nl));
+      if (fromElsewhere && fromElsewhere[1] !== moduleName) {
+        sites.problem = `${name} is imported on line ${lineOf(at)}, so it can't be renamed`;
+        return sites;
+      }
+      const prev = src.slice(0, at).replace(/\s+$/, '').slice(-1);
+      if (prev === '.' && !members.attribute) {
+        sites.visible.push({ at, reason: `${name} is an attribute name here, so it stays` });
+      } else if (
+        prev &&
+        '(,'.includes(prev) &&
+        /^\s*=(?!=)/.test(src.slice(at + name.length)) &&
+        depthAt(at, loc) > 0 &&
+        !members.keyword
+      ) {
+        sites.visible.push({ at, reason: `${name} is a keyword argument here, so it stays` });
+      } else sites.code.push(at);
+    }
+    return sites;
+  }
+
   // ---------- main entry ----------
 
   /**
@@ -637,7 +733,7 @@
    *   added:       number of new definitions written to the module
    * }
    */
-  function extract(src, secrets, { moduleName = 'hidden_secrets', existingModule = '' } = {}) {
+  function extract(src, secrets, { moduleName = 'hidden_secrets', existingModule = '', fileName = 'this file', record = true } = {}) {
     const tokens = lex(src);
     const docstrings = statementStrings(src, tokens);
     const moduleDefs = parseModule(existingModule);
@@ -683,7 +779,8 @@
     const fromModule = moduleImportNames(src, tokens, moduleName);
     const variables = [];
     const others = [];
-    for (const secret of secrets.filter((x) => x.value.trim())) {
+    const renameOnly = secrets.filter((x) => x.mode === 'rename' && x.value.trim());
+    for (const secret of secrets.filter((x) => x.mode !== 'rename' && x.value.trim())) {
       const value = secret.value.trim();
       const statementForm = ASSIGN_RE.exec(value);
       const name = isValidName(value) ? value : statementForm ? statementForm[1] : '';
@@ -732,27 +829,10 @@
     /** Where variable v's name appears in code, to be renamed to its alias.
      *  Strings and comments are left to the text search below. */
     function findRenames(v) {
-      for (const m of src.matchAll(new RegExp(`(?<![\\w])${v.name}(?![\\w])`, 'g'))) {
-        const at = m.index;
-        const loc = locate(tokens, at);
-        if (loc.k !== -1 || (v.a && at >= v.a.s && at < v.a.e)) continue;
-        if (loc.field && loc.field.debug) {
-          v.problem = `${v.name} is printed by an f-string {…=} on line ${lineOf(at)}, so it can't be renamed`;
-          return;
-        }
-        const lineStart = src.lastIndexOf('\n', at - 1) + 1;
-        const line = src.slice(lineStart, src.indexOf('\n', at) === -1 ? src.length : src.indexOf('\n', at));
-        const fromElsewhere = /^\s*(?:from\s+(\S+)\s+)?import\b/.exec(line);
-        if (fromElsewhere && fromElsewhere[1] !== moduleName) {
-          v.problem = `${v.name} is imported on line ${lineOf(at)}, so it can't be renamed`;
-          return;
-        }
-        const prev = src.slice(0, at).replace(/\s+$/, '').slice(-1);
-        if (prev === '.') v.visible.push({ at, reason: `${v.name} is an attribute name here, so it stays` });
-        else if ('(,'.includes(prev) && /^\s*=(?!=)/.test(src.slice(at + v.name.length))) {
-          v.visible.push({ at, reason: `${v.name} is a keyword argument here, so it stays` });
-        } else v.renames.push(at);
-      }
+      const sites = nameSites(src, tokens, docstrings, v.name, moduleName);
+      v.problem = sites.problem;
+      v.renames = sites.code.filter((at) => !(v.a && at >= v.a.s && at < v.a.e));
+      v.visible = sites.visible;
     }
     // A definition can only move if everything it uses will exist in the
     // module too: builtins, copied imports, or other variables moving with it.
@@ -801,6 +881,49 @@
       }
       // Mentions in strings and comments go through the text search below.
       others.push({ id: v.secret.id, value: v.name, name: v.alias, mentionOf: v, result: v.result });
+    }
+
+    // Rename only: the code stays here, but says `to` wherever it said `from`.
+    const records = [];
+    for (const secret of renameOnly) {
+      const result = { hidden: 0, problems: [] };
+      results.set(secret.id, result);
+      const from = secret.value.trim();
+      const to = secret.name.trim();
+      const fail = (reason) => result.problems.push({ line: 0, reason });
+      if (!isValidName(from)) fail('Rename only works on a name, like MONTH_CODES');
+      else if (!isValidName(to)) fail(to ? `"${to}" isn't a valid Python name` : 'needs a new name');
+      else if (to === from) fail('give it a different name to rename it to');
+      else if (codeNames.has(to)) fail(`"${to}" is already used in this file — pick another name`);
+      else if (renameOnly.some((x) => x !== secret && x.name.trim() === to)) fail(`"${to}" is the new name of another secret too`);
+      else if (variables.some((v) => v.name === from)) fail(`${from} is also being moved out by another secret`);
+      if (result.problems.length) continue;
+      if (!bindsName(src, tokens, from)) {
+        fail(`${from} isn't defined in this file (it's built in, or comes from elsewhere), so it can't be renamed`);
+        continue;
+      }
+      const members = definesMember(src, from);
+      if ((members.attribute || members.keyword) && BUILTIN_ATTRS.has(from)) {
+        fail(`${from} is also the name of a built-in method (like dict.${from}), so renaming it could break things`);
+        continue;
+      }
+      const sites = nameSites(src, tokens, docstrings, from, moduleName, members);
+      if (sites.problem) {
+        fail(sites.problem);
+        continue;
+      }
+      for (const at of sites.code.concat(sites.text.filter((x) => x.kind !== 'string').map((x) => x.at))) {
+        if (overlaps(at, at + from.length)) continue; // inside something already moved
+        edits.push({ s: at, e: at + from.length, text: to });
+        consumed.push([at, at + from.length]);
+        result.hidden++;
+      }
+      for (const x of sites.visible) result.problems.push({ line: lineOf(x.at), reason: x.reason });
+      for (const x of sites.text.filter((y) => y.kind === 'string')) {
+        // Renaming text inside a string would change what the program does.
+        result.problems.push({ line: lineOf(x.at), reason: `${from} is inside a string, so it stays` });
+      }
+      if (result.hidden) records.push(`${from} -> ${to}`);
     }
 
     const ordered = others.sort((a, b) => b.value.trim().length - a.value.trim().length);
@@ -984,8 +1107,16 @@
     code = addImport(code, moduleName, usedNames);
 
     let moduleText = existingModule || '';
-    if (newDefs.length) {
+    // Note each rename, so "Put names back" can undo it later.
+    const notes = record ? records.map((r) => `# Renamed in ${fileName}: ${r}`).filter((l) => !moduleText.includes(l)) : [];
+    if (newDefs.length || notes.length) {
       if (!moduleText.trim()) moduleText = MODULE_HEADER;
+    }
+    if (notes.length) {
+      if (!moduleText.endsWith('\n')) moduleText += '\n';
+      moduleText += '\n' + notes.join('\n') + '\n';
+    }
+    if (newDefs.length) {
       if (!moduleText.endsWith('\n')) moduleText += '\n';
       // In file order, so a definition comes after anything it uses.
       const have = new Set(moduleText.split('\n').map((l) => l.trim()));
@@ -1000,7 +1131,29 @@
       moduleText += '\n' + lines.join('\n') + '\n';
     }
 
-    return { code, moduleText, results, added: newDefs.length };
+    return { code, moduleText, results, added: newDefs.length + notes.length };
+  }
+
+  const RENAME_NOTE = /^# Renamed in (.+): ([A-Za-z_]\w*) -> ([A-Za-z_]\w*)\n?/gm;
+
+  /** The renames noted in the secrets module for `fileName`: [{ from, to }]. */
+  function renamesFor(moduleText, fileName) {
+    return [...(moduleText || '').matchAll(RENAME_NOTE)]
+      .filter((m) => m[1] === fileName)
+      .map((m) => ({ from: m[2], to: m[3] }));
+  }
+
+  /** Undo the noted renames in `src`: every `to` goes back to `from`, and the
+   *  notes come out of the module. Returns { code, moduleText, results }. */
+  function restoreNames(src, moduleText, { moduleName = 'hidden_secrets', fileName = 'this file' } = {}) {
+    const back = renamesFor(moduleText, fileName).map((r, i) => ({ id: i + 1, value: r.to, name: r.from, mode: 'rename' }));
+    const out = extract(src, back, { moduleName, existingModule: moduleText, fileName, record: false });
+    // Drop the notes for names that went back (or no longer appear at all).
+    const done = new Set(back.filter((b) => !out.results.get(b.id).problems.length).map((b) => `${b.name} -> ${b.value}`));
+    const cleaned = out.moduleText.replace(RENAME_NOTE, (line, file, from, to) =>
+      file === fileName && done.has(`${from} -> ${to}`) ? '' : line
+    );
+    return { code: out.code, moduleText: cleaned, results: out.results, renames: back };
   }
 
   /** First free SECRET_n name, avoiding `taken` (a Set) and names in src/module. */
@@ -1023,7 +1176,7 @@
     return topLevelAssignments(src, topLevel(src, lex(src))).some((a) => a.name === v) ? v : '';
   }
 
-  const api = { extract, suggestName, variableName, isValidName, lex, locate, parseModule };
+  const api = { extract, restoreNames, renamesFor, suggestName, variableName, isValidName, lex, locate, parseModule };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PyExtract = api;
 })(typeof window !== 'undefined' ? window : globalThis);

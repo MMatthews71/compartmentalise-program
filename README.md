@@ -56,6 +56,24 @@ you move at the same time. If it uses something that stays in your file — say
 `LOOKUP = dict(zip(range(n), …))` with `n` defined in your file — you're told
 which name to add as a secret too.
 
+### Rename only
+
+Sometimes you don't need to hide a value — you just don't want the AI to know
+exactly what something is. Set a secret's **Action** to **Rename only**, type
+the variable (or function, or class) name, and give it a new name: with
+`MONTH_CODES` → `CODES`, every `MONTH_CODES` in your file becomes `CODES` —
+the definition, every use, comments — and nothing moves to the secrets file.
+The AI still sees the code and can work on it; it just sees `CODES`.
+
+The secrets file keeps a note of each rename. When the AI is done, click
+**Put names back**: every `CODES` in the file — including any new code the
+AI wrote with it — goes back to `MONTH_CODES`, and the note is removed.
+
+Renaming leaves alone (and lists in red) a name inside a string, since
+changing it would change what the program does. It refuses names your file
+doesn't define (built-ins like `len`, or imported names), and names that would
+clash with something already in the file.
+
 Matching rules:
 - **Inside strings and comments**, a secret matches anywhere — `abc` is found
   inside `"abcdef"`.

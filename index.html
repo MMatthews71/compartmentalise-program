@@ -29,6 +29,9 @@
             <h2>1 · Your Python file</h2>
             <div class="panel-actions">
               <button id="open-btn" class="btn" title="Open a .py file from disk">Open file…</button>
+              <button id="restore-names-btn" class="btn ghost" title="Undo the renames noted in the secrets file">
+                Put names back
+              </button>
               <button id="detect-btn" class="btn ghost" title="Scan the code for things that look like secrets">
                 Auto-detect
               </button>
@@ -62,7 +65,7 @@
       <!-- Secrets -->
       <div class="panel secrets-panel">
         <div class="panel-head">
-          <h2>2 · Secrets to move out</h2>
+          <h2>2 · Secrets to hide</h2>
           <div class="panel-actions">
             <label class="module-name" title="The private file the secrets go into, next to your file">
               Secrets file
@@ -76,8 +79,9 @@
         <div class="secrets-table-wrap">
           <div class="secrets-head-row">
             <span class="col-secret">Secret value</span>
+            <span class="col-mode">Action</span>
             <span class="col-ph">Name in code</span>
-            <span class="col-hits">Moved</span>
+            <span class="col-hits">Hidden</span>
             <span class="col-del"></span>
           </div>
           <div id="secrets-list"></div>

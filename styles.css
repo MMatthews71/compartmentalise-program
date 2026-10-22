@@ -285,7 +285,7 @@ textarea.code[readonly] {
 .secrets-head-row,
 .secret-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 52px 34px;
+  grid-template-columns: 1fr 124px 1fr 52px 34px;
   gap: 10px;
   align-items: center;
 }
@@ -339,8 +339,21 @@ textarea.code[readonly] {
   color: var(--accent);
 }
 
-.secret-row input.ph-input[readonly] {
-  color: var(--text-dim);
+.secret-row select.mode-select {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 7px;
+  padding: 7px 6px;
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+}
+
+.secret-row select.mode-select:focus {
+  border-color: var(--accent);
 }
 
 .row-note {
@@ -466,7 +479,7 @@ textarea.code[readonly] {
   }
   .secrets-head-row,
   .secret-row {
-    grid-template-columns: 1fr 1fr 44px 30px;
+    grid-template-columns: 1fr 110px 1fr 44px 30px;
   }
 }
 
