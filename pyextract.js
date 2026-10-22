@@ -40,14 +40,28 @@
 
   /** Find every string literal and comment, in source order. Everything
    *  between them is code. Strings record their prefix (r, b, f, u…), quote
-   *  and where their content sits. */
+   *  and where their content sits; f-strings also record their {fields} and
+   *  the strings inside them (`children`). */
   function lex(src) {
+    return lexCode(src, 0, false, false).tokens;
+  }
+
+  /** Lex code from `i`. Inside an f-string {field} (`inField`), stop where
+   *  the expression ends: at the closing }, or at the ! or : that starts a
+   *  conversion or format spec. */
+  function lexCode(src, i, inField, oneLine) {
     const tokens = [];
     const n = src.length;
-    let i = 0;
+    let depth = 0;
     while (i < n) {
       const c = src[i];
-      if (c === '#') {
+      if (inField) {
+        if (oneLine && c === '\n') break;
+        if (depth === 0 && (c === '}' || c === ':' || (c === '!' && src[i + 1] !== '='))) break;
+        if ('([{'.includes(c)) depth++;
+        else if (')]}'.includes(c)) depth--;
+      }
+      if (c === '#' && !inField) {
         const nl = src.indexOf('\n', i);
         const end = nl === -1 ? n : nl;
         tokens.push({ type: 'comment', start: i, end, contentStart: i + 1, contentEnd: end });
@@ -55,41 +69,88 @@
         continue;
       }
       if (c === '"' || c === "'") {
-        let p = i;
-        while (p > 0 && i - p < 2 && /[rRbBuUfF]/.test(src[p - 1])) p--;
-        if (p > 0 && WORD_CHAR.test(src[p - 1])) p = i; // letters belong to a name
-        const quote = src.startsWith(c + c + c, i) ? c + c + c : c;
-        let j = i + quote.length;
-        let closed = false;
-        while (j < n) {
-          if (src[j] === '\\') {
-            j += 2;
-            continue;
-          }
-          if (src.startsWith(quote, j)) {
-            closed = true;
-            break;
-          }
-          if (quote.length === 1 && src[j] === '\n') break;
-          j++;
-        }
-        const contentEnd = Math.min(j, n);
-        tokens.push({
-          type: 'string',
-          start: p,
-          end: closed ? j + quote.length : contentEnd,
-          prefix: src.slice(p, i),
-          quote,
-          contentStart: i + quote.length,
-          contentEnd,
-          closed
-        });
-        i = closed ? j + quote.length : contentEnd;
+        const t = lexString(src, i);
+        tokens.push(t);
+        i = t.end;
         continue;
       }
       i++;
     }
-    return tokens;
+    return { tokens, end: i };
+  }
+
+  /** Lex the string literal whose opening quote is at `i`. */
+  function lexString(src, i) {
+    const n = src.length;
+    const c = src[i];
+    let p = i;
+    while (p > 0 && i - p < 2 && /[rRbBuUfF]/.test(src[p - 1])) p--;
+    if (p > 0 && WORD_CHAR.test(src[p - 1])) p = i; // letters belong to a name
+    const prefix = src.slice(p, i);
+    const quote = src.startsWith(c + c + c, i) ? c + c + c : c;
+    const oneLine = quote.length === 1;
+    const isF = /f/i.test(prefix);
+    const raw = /r/i.test(prefix);
+    const fields = []; // { open, start, end, close }: {, expression, }
+    const children = [];
+    let j = i + quote.length;
+    let closed = false;
+    while (j < n) {
+      const ch = src[j];
+      if (ch === '\\') {
+        if (isF && !raw && src.startsWith('N{', j + 1)) {
+          // \N{EM DASH}: the braces belong to the escape, not a field.
+          const close = src.indexOf('}', j);
+          j = close === -1 ? n : close + 1;
+        } else {
+          // A backslash never stops a brace starting an f-string field.
+          j += isF && (src[j + 1] === '{' || src[j + 1] === '}') ? 1 : 2;
+        }
+        continue;
+      }
+      if (src.startsWith(quote, j)) {
+        closed = true;
+        break;
+      }
+      if (oneLine && ch === '\n') break;
+      if (isF && ch === '{' && src[j + 1] === '{') {
+        j += 2;
+        continue;
+      }
+      if (isF && ch === '{') {
+        const inner = lexCode(src, j + 1, true, oneLine);
+        children.push(...inner.tokens);
+        // f"{x=}": the = asks Python to print the expression; it isn't part of it.
+        const debug = /(?<![=!<>])=\s*$/.exec(src.slice(j + 1, inner.end));
+        const exprEnd = debug ? j + 1 + debug.index : inner.end;
+        // Skip any !conversion or :format spec to the closing brace.
+        let k = inner.end;
+        let depth = 0;
+        for (; k < n; k++) {
+          const x = src[k];
+          if (oneLine && x === '\n') break;
+          if (x === '{') depth++;
+          else if (x === '}' && depth-- === 0) break;
+        }
+        fields.push({ open: j, start: j + 1, end: exprEnd, close: Math.min(k + 1, n), debug: Boolean(debug) });
+        j = src[k] === '}' ? k + 1 : k;
+        continue;
+      }
+      j++;
+    }
+    const contentEnd = Math.min(j, n);
+    return {
+      type: 'string',
+      start: p,
+      end: closed ? j + quote.length : contentEnd,
+      prefix,
+      quote,
+      contentStart: i + quote.length,
+      contentEnd,
+      closed,
+      fields,
+      children
+    };
   }
 
   /** Index of the token containing `pos`, or -1. */
@@ -103,6 +164,16 @@
       else return mid;
     }
     return -1;
+  }
+
+  /** What `pos` sits in: the innermost token list whose code holds it
+   *  (descending into f-string {fields}), the index of the token containing
+   *  it there (-1 if it's code), and the field, if any. */
+  function locate(tokens, pos, field = null) {
+    const k = tokenIndexAt(tokens, pos);
+    const t = tokens[k];
+    const f = t && t.fields ? t.fields.find((x) => x.start <= pos && pos < x.end) : null;
+    return f ? locate(t.children, pos, f) : { tokens, k, field };
   }
 
   /** Walk [s, e) calling onCode(index) for code characters and
@@ -176,11 +247,6 @@
     return result;
   }
 
-  /** Whether a string token is an f-string with {expressions} in it. */
-  function hasFields(src, t) {
-    return /f/i.test(t.prefix) && /\{(?!\{)/.test(src.slice(t.contentStart, t.contentEnd).replace(/\{\{/g, ''));
-  }
-
   // ---------- what can be swapped for a name ----------
 
   /** Why code range [s, e) can't be replaced by a name, or '' if it can. It
@@ -200,7 +266,7 @@
       (t) => {
         if (t.type === 'string') {
           summary += ' \u0001 ';
-          if (hasFields(src, t)) fString = true;
+          if (t.fields.length) fString = true;
         } else summary += ' ';
       }
     );
@@ -257,6 +323,13 @@
     if ((WORD_CHAR.test(first) || first === '.') && edge.test(before)) return 'is part of a longer name or number';
     if ((WORD_CHAR.test(last) || last === '.') && edge.test(after)) return 'is part of a longer name or number';
     if (splitsNumber(src, s) || splitsNumber(src, e)) return 'is part of a longer number';
+    if (first === '+' || first === '-') {
+      // `x + 1` is a sum, not x followed by the value +1; and -5 ** 2 is
+      // -(5 ** 2), so a signed number can't stand in front of **.
+      const prev = src.slice(0, s).replace(/[ \t]+$/, '').slice(-1);
+      if (/[\p{L}\p{N}_)\]}"']/u.test(prev)) return 'is part of a sum, not a value';
+      if (/^\s*\*\*/.test(src.slice(e))) return 'is part of a power (**)';
+    }
     if ('([{'.includes(first)) {
       const prev = src.slice(0, s).replace(/[ \t]+$/, '').slice(-1);
       if (/[\p{L}\p{N}_)\]}"']/u.test(prev)) return 'is part of a call or index, not a value';
@@ -278,16 +351,12 @@
     for (let i = s - 1; i >= t.contentStart && src[i] === '\\'; i--) slashes++;
     if (slashes % 2 === 1) return 'starts in the middle of an escape like \\n';
     if (/(?:^|[^\\])(?:\\\\)*\\$/.test(text)) return 'ends in the middle of an escape like \\n';
+    if (!/r/i.test(t.prefix) && /\\N\{/.test(src.slice(t.contentStart, t.contentEnd))) {
+      return 'is in a string with a \\N{…} escape';
+    }
     if (/f/i.test(t.prefix)) {
       if (/[{}]/.test(text)) return 'contains { or } inside an f-string';
-      let depth = 0;
-      for (let i = t.contentStart; i < s; i++) {
-        const c = src[i];
-        if ((c === '{' || c === '}') && depth === 0 && src[i + 1] === c) i++;
-        else if (c === '{') depth++;
-        else if (c === '}') depth = Math.max(0, depth - 1);
-      }
-      if (depth > 0) return 'is inside an f-string {expression}';
+      if (t.fields.some((f) => s < f.close && e > f.open)) return 'runs into an f-string {…} part';
     }
     return '';
   }
@@ -302,14 +371,17 @@
     );
   }
 
-  /** Rebuild string token t with each occurrence swapped for its name. */
-  function rebuildString(src, t, occs, neighbour) {
+  /** Edits that swap each occurrence in string token t for its name. */
+  function stringEdits(src, t, occs, neighbour) {
     const isBytes = /b/i.test(t.prefix);
     const isF = /f/i.test(t.prefix);
     const q = t.quote;
     if (occs.length === 1 && occs[0].s === t.contentStart && occs[0].e === t.contentEnd && !neighbour) {
-      return occs[0].name;
+      return [{ s: t.start, e: t.end, text: occs[0].name }];
     }
+    // Already an f-string: drop each name in as a {field}, leaving the rest
+    // (and any {fields} it already has) untouched.
+    if (isF) return occs.map((o) => ({ s: o.s, e: o.e, text: `{${o.name}}` }));
     const pieces = [];
     let pos = t.contentStart;
     for (const o of occs) {
@@ -320,13 +392,11 @@
     if (isBytes) {
       // Bytes can't be f-strings: join the pieces with + instead.
       const parts = pieces.filter((p) => p.name || p.lit).map((p) => p.name || t.prefix + q + p.lit + q);
-      return `(${parts.join(' + ')})`;
+      return [{ s: t.start, e: t.end, text: `(${parts.join(' + ')})` }];
     }
-    const prefix = (isF ? t.prefix : t.prefix + 'f').replace(/[uU]/g, '');
-    const body = pieces
-      .map((p) => (p.name ? `{${p.name}}` : isF ? p.lit : p.lit.replace(/[{}]/g, '$&$&')))
-      .join('');
-    return prefix + q + body + q;
+    const prefix = (t.prefix + 'f').replace(/[uU]/g, '');
+    const body = pieces.map((p) => (p.name ? `{${p.name}}` : p.lit.replace(/[{}]/g, '$&$&'))).join('');
+    return [{ s: t.start, e: t.end, text: prefix + q + body + q }];
   }
 
   // ---------- the secrets module ----------
@@ -356,7 +426,7 @@
     const re = /[A-Za-z_]\w*/g;
     let m;
     while ((m = re.exec(src)) !== null) {
-      if (tokenIndexAt(tokens, m.index) === -1 && !/[\w.]/.test(src[m.index - 1] || '')) names.add(m[0]);
+      if (locate(tokens, m.index).k === -1 && !/[\w.]/.test(src[m.index - 1] || '')) names.add(m[0]);
     }
     return names;
   }
@@ -431,7 +501,7 @@
     const results = new Map();
     const consumed = []; // [s, e) ranges already taken by a longer secret
     const edits = []; // { s, e, text }
-    const stringOccs = new Map(); // token index -> [{ s, e, name }]
+    const stringOccs = new Map(); // string token -> { scope, k, occs: [{ s, e, name }] }
     const imported = new Set();
     const taken = new Map(moduleDefs); // name -> value key, for this run
     const newDefs = []; // { name, text }
@@ -481,30 +551,54 @@
         }
         const s = m.index;
         const e = s + m[0].length;
-        const ks = tokenIndexAt(tokens, s);
-        const ke = tokenIndexAt(tokens, e - 1);
-        const startsInside = ks !== -1 && tokens[ks].start !== s;
-        const endsInside = ke !== -1 && tokens[ke].end !== e;
-        if (!startsInside && !endsInside) candidates.push({ s, e, where: 'code' });
+        // Both ends must be in the same stretch of code — at the top level or
+        // inside the same f-string {field} — and not part-way into a string.
+        const a = locate(tokens, s);
+        const b = locate(tokens, e - 1);
+        const sameCode = a.tokens === b.tokens && a.field === b.field;
+        const startsInside = a.k !== -1 && a.tokens[a.k].start !== s;
+        const endsInside = b.k !== -1 && b.tokens[b.k].end !== e;
+        if (sameCode && !startsInside && !endsInside) {
+          candidates.push({ s, e, where: 'code', scope: a.tokens, field: a.field });
+        } else if (!(sameCode && a.k !== -1 && a.k === b.k)) {
+          // Not wholly inside one string either (that's the search below).
+          candidates.push({ s, e, where: 'partial' });
+        }
       }
       // In strings and comments: exact text, anywhere — even mid-word.
       for (let at = src.indexOf(value); at !== -1; at = src.indexOf(value, at + 1)) {
-        const k = tokenIndexAt(tokens, at);
-        const t = tokens[k];
-        if (t && at >= t.contentStart && at + value.length <= t.contentEnd) {
-          const where = t.type === 'string' && docstrings.has(k) ? 'docstring' : t.type;
-          candidates.push({ s: at, e: at + value.length, where, k });
+        const end = at + value.length;
+        const { tokens: scope, k, field } = locate(tokens, at);
+        const last = locate(tokens, end - 1);
+        const t = scope[k];
+        if (t && end <= t.contentEnd && at >= t.contentStart) {
+          const where = t.type === 'string' && scope === tokens && docstrings.has(k) ? 'docstring' : t.type;
+          candidates.push({ s: at, e: end, where, scope, k, field });
+        } else if (k !== -1 || last.k !== -1 || last.tokens !== scope || last.field !== field) {
+          // Crosses the edge of a string or comment. (Plain code is the
+          // whole-word search above; part of a longer name is left alone.)
+          candidates.push({ s: at, e: end, where: 'partial' });
         }
       }
-      candidates.sort((a, b) => a.s - b.s);
+      // Spots that can't work go last, so they never block one that can.
+      candidates.sort((a, b) => (a.where === 'partial') - (b.where === 'partial') || a.s - b.s);
 
       for (const c of candidates) {
         if (overlaps(c.s, c.e)) continue;
+        if (c.where === 'partial') {
+          problem(c.s, 'starts or ends part-way through a string — select the whole string, or only text inside it');
+          continue;
+        }
+        if (c.field && c.field.debug) {
+          // f"{x=}" prints its own source, so renaming inside it changes the output.
+          problem(c.s, 'is in an f-string {…=} that prints its own code');
+          continue;
+        }
 
         if (c.where === 'code') {
           // A whole docstring, quotes and all: hide its text, keep it a docstring.
           const k = tokenIndexAt(tokens, c.s);
-          if (k !== -1 && docstrings.has(k) && tokens[k].start === c.s && tokens[k].end === c.e) {
+          if (c.scope === tokens && k !== -1 && docstrings.has(k) && tokens[k].start === c.s && tokens[k].end === c.e) {
             Object.assign(c, { s: tokens[k].contentStart, e: tokens[k].contentEnd, where: 'docstring', k });
             if (c.s === c.e) continue;
           }
@@ -526,7 +620,7 @@
               problem(c.s, "isn't the whole statement — select to the end of the line");
               continue;
             }
-            const why = literalProblem(src, tokens, c.s + assign[0].length, c.e);
+            const why = literalProblem(src, c.scope, c.s + assign[0].length, c.e);
             if (why) {
               problem(c.s, `${assign[1]}'s value ${why}`);
               continue;
@@ -544,23 +638,23 @@
             result.hidden++;
             continue;
           }
-          const why = literalProblem(src, tokens, c.s, c.e) || surroundingsProblem(src, tokens, c.s, c.e);
+          const why = literalProblem(src, c.scope, c.s, c.e) || surroundingsProblem(src, c.scope, c.s, c.e);
           if (why) {
             problem(c.s, why);
             continue;
           }
         } else if (c.where === 'docstring') {
-          const why = stringProblem(src, tokens[c.k], c.s, c.e);
+          const why = stringProblem(src, c.scope[c.k], c.s, c.e);
           if (why) {
             problem(c.s, why);
             continue;
           }
         } else if (c.where === 'string') {
-          const t = tokens[c.k];
+          const t = c.scope[c.k];
           const why =
             stringProblem(src, t, c.s, c.e) ||
             // (b"x" + NAME) can't be joined to a neighbouring bytes literal.
-            (/b/i.test(t.prefix) && hasStringNeighbour(src, tokens, c.k) ? 'is in bytes joined to another string' : '');
+            (/b/i.test(t.prefix) && hasStringNeighbour(src, c.scope, c.k) ? 'is in bytes joined to another string' : '');
           if (why) {
             problem(c.s, why);
             continue;
@@ -579,11 +673,13 @@
         let stored;
         if (c.where === 'code') stored = text;
         else if (c.where === 'string') {
-          const t = tokens[c.k];
+          const t = c.scope[c.k];
           // Without backslashes r"…" means the same as "…", so drop the r and
           // let equal values share one name.
           const prefix = t.prefix.replace(text.includes('\\') ? /[fF]/g : /[fFrR]/g, '');
-          stored = prefix + t.quote + text + t.quote;
+          // Likewise 'x' and "x" are the same value; use "x" where it's safe.
+          const quote = /["'\\\n]/.test(text) ? t.quote : '"';
+          stored = prefix + quote + text + quote;
         } else stored = JSON.stringify(text);
         const name = allocate(base, normaliseExpr(stored), (n) => `${n} = ${stored}`, false);
 
@@ -591,8 +687,9 @@
           edits.push({ s: c.s, e: c.e, text: name });
           imported.add(name);
         } else if (c.where === 'string') {
-          if (!stringOccs.has(c.k)) stringOccs.set(c.k, []);
-          stringOccs.get(c.k).push({ s: c.s, e: c.e, name });
+          const t = c.scope[c.k];
+          if (!stringOccs.has(t)) stringOccs.set(t, { scope: c.scope, k: c.k, occs: [] });
+          stringOccs.get(t).occs.push({ s: c.s, e: c.e, name });
           imported.add(name);
         } else {
           edits.push({ s: c.s, e: c.e, text: name });
@@ -602,10 +699,9 @@
       }
     }
 
-    for (const [k, occs] of stringOccs) {
-      const t = tokens[k];
+    for (const [t, { scope, k, occs }] of stringOccs) {
       occs.sort((a, b) => a.s - b.s);
-      edits.push({ s: t.start, e: t.end, text: rebuildString(src, t, occs, hasStringNeighbour(src, tokens, k)) });
+      edits.push(...stringEdits(src, t, occs, hasStringNeighbour(src, scope, k)));
     }
 
     edits.sort((a, b) => b.s - a.s);
@@ -641,7 +737,7 @@
     return m ? m[1] : '';
   }
 
-  const api = { extract, suggestName, assignedName, isValidName, lex, parseModule };
+  const api = { extract, suggestName, assignedName, isValidName, lex, locate, parseModule };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PyExtract = api;
 })(typeof window !== 'undefined' ? window : globalThis);
