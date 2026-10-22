@@ -95,7 +95,7 @@ function addSecret(value = '', placeholder = '') {
   secrets.unshift({ id: nextId++, value, placeholder: ph });
   renderSecrets();
   secretsList.scrollTop = 0;
-  if (!value) secretsList.querySelector('input')?.focus();
+  if (!value) secretsList.querySelector('.value-input')?.focus();
   sanitise();
 }
 
@@ -138,12 +138,15 @@ function renderSecrets() {
     row.className = 'secret-row';
     row.dataset.id = String(secret.id);
 
-    const valueInput = document.createElement('input');
-    valueInput.type = 'text';
+    // A textarea (not an input) so secrets can span several lines.
+    const valueInput = document.createElement('textarea');
+    valueInput.className = 'value-input';
+    valueInput.rows = 1;
     valueInput.value = secret.value;
     valueInput.spellcheck = false;
     valueInput.addEventListener('input', () => {
       secret.value = valueInput.value;
+      fitToContent(valueInput);
       sanitise();
     });
 
@@ -169,7 +172,14 @@ function renderSecrets() {
 
     row.append(valueInput, phInput, hits, del);
     secretsList.append(row);
+    fitToContent(valueInput);
   }
+}
+
+/** Grow a textarea to show all of its lines. */
+function fitToContent(textarea) {
+  textarea.style.height = 'auto';
+  textarea.style.height = `${textarea.scrollHeight + 2}px`;
 }
 
 /** Write the per-row hit counts after a sanitise pass. */

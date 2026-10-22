@@ -23,7 +23,8 @@ else sensitive to a third-party model.**
 
 Secrets match **whole words only**: a secret `abc` hides `abc` on its own (or
 in `x.abc` / `"abc"`), but leaves the first three letters of `abcd` alone.
-Newly added secrets appear at the top of the list.
+Newly added secrets appear at the top of the list. A secret can span several
+lines (press Enter in the value box, or paste multi-line text).
 
 Shortcuts:
 - Select text in the code box and press **Ctrl/Cmd + E** to add it as a secret.
