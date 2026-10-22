@@ -3,67 +3,38 @@
 /*
  * Compartmentalise — renderer logic.
  *
- * Everything here is plain, offline string work. The data model is a list of
- * secrets, each { id, value, placeholder }. "Sanitise" swaps every value for
- * its placeholder; "Restore" does the reverse. Secrets are held only in this
- * array in memory — never persisted, never sent anywhere.
+ * The data model is a list of secrets, each { id, value, name }. Every edit
+ * re-runs PyExtract (pyextract.js) over the code, which moves each secret into
+ * a separate secrets module and imports it back by name. Nothing leaves this
+ * machine; files are only read and written through the bridge in preload.js.
  */
 
 const IS_MAC = navigator.platform.toUpperCase().includes('MAC');
 const MOD_KEY = IS_MAC ? 'Cmd' : 'Ctrl';
+const { extract, suggestName, assignedName, isValidName } = window.PyExtract;
+// Only there when running inside the desktop app.
+const fileBridge = window.files || null;
 
-/** @type {{id:number, value:string, placeholder:string}[]} */
+/** @type {{id:number, value:string, name:string}[]} */
 let secrets = [];
 let nextId = 1;
-let nextPlaceholderNum = 1;
+/** The file opened from disk, if any: { path, eol }. */
+let openFile = null;
+/** Current contents of the secrets module next to that file ('' if none). */
+let existingModule = '';
+let lastResult = null;
 
 // ---------- element handles ----------
 const el = (id) => document.getElementById(id);
 
 const input = el('input');
 const output = el('output');
+const moduleOutput = el('module-output');
 const secretsList = el('secrets-list');
 const replaceCount = el('replace-count');
-const restoreInput = el('restore-input');
-const restoreOutput = el('restore-output');
-const restoreCount = el('restore-count');
-const restoreEmptyNote = el('restore-empty-note');
+const moduleNameInput = el('module-name');
 
 // ---------- helpers ----------
-
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-const WORD_CHAR = /[\p{L}\p{N}_]/u;
-
-/** Regex source for matching a secret in code.
- *  - Whole word only: if it starts (or ends) with a letter, digit or
- *    underscore, the neighbouring character must not be one. So "abc" matches
- *    in "x = abc;" but not inside "abcd" or "xabc".
- *  - Whitespace-tolerant: leading/trailing whitespace is ignored and any run
- *    of spaces, tabs or newlines matches any other run, so a multi-line secret
- *    still matches when its indentation differs from the code's. */
-function secretSource(find) {
-  const core = find.trim();
-  const before = WORD_CHAR.test(core[0]) ? '(?<![\\p{L}\\p{N}_])' : '';
-  const after = WORD_CHAR.test(core[core.length - 1]) ? '(?![\\p{L}\\p{N}_])' : '';
-  return before + core.split(/\s+/).map(escapeRegExp).join('\\s+') + after;
-}
-
-/** Replace every occurrence of `find` with `replace`, returning text + count.
- *  With `asSecret`, matching follows secretSource's rules above. */
-function replaceAllCounted(text, find, replace, asSecret = false) {
-  if (!(asSecret ? find.trim() : find)) return { text, count: 0 };
-  const source = asSecret ? secretSource(find) : escapeRegExp(find);
-  const re = new RegExp(source, 'gu');
-  let count = 0;
-  const result = text.replace(re, () => {
-    count += 1;
-    return replace;
-  });
-  return { text: result, count };
-}
 
 function showToast(message) {
   const toast = el('toast');
@@ -76,7 +47,7 @@ function showToast(message) {
   showToast._t = setTimeout(() => {
     toast.classList.remove('show');
     setTimeout(() => toast.classList.add('hidden'), 200);
-  }, 1600);
+  }, 2200);
 }
 
 async function copyText(text, label) {
@@ -92,45 +63,34 @@ async function copyText(text, label) {
   }
 }
 
+function moduleName() {
+  return moduleNameInput.value.trim();
+}
+
 // ---------- secrets model ----------
 
-function addSecret(value = '', placeholder = '') {
-  const ph = placeholder || `__SECRET_${nextPlaceholderNum++}__`;
+function addSecret(value = '') {
+  const name = assignedName(value) || suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
   // Newest first, so a freshly added row is always visible at the top.
-  secrets.unshift({ id: nextId++, value, placeholder: ph });
+  secrets.unshift({ id: nextId++, value, name });
   renderSecrets();
   secretsList.scrollTop = 0;
   if (!value) secretsList.querySelector('.value-input')?.focus();
-  sanitise();
+  update();
 }
 
 function removeSecret(id) {
   secrets = secrets.filter((s) => s.id !== id);
   renderSecrets();
-  sanitise();
+  update();
 }
 
 function clearSecrets() {
   if (secrets.length === 0) return;
   secrets = [];
-  nextPlaceholderNum = 1;
   renderSecrets();
-  sanitise();
+  update();
   showToast('Secrets cleared');
-}
-
-/** Build the ordered list used for replacing: longest values first so that a
- *  secret that is a substring of another never clobbers it. */
-function secretsByValueLength() {
-  return [...secrets]
-    .filter((s) => s.value.length > 0)
-    .sort((a, b) => b.value.length - a.value.length);
-}
-
-function placeholdersByLength() {
-  return [...secrets]
-    .filter((s) => s.placeholder.length > 0 && s.value.length > 0)
-    .sort((a, b) => b.placeholder.length - a.placeholder.length);
 }
 
 // ---------- rendering the secrets table ----------
@@ -149,25 +109,34 @@ function renderSecrets() {
     valueInput.rows = 1;
     valueInput.value = secret.value;
     valueInput.spellcheck = false;
-    valueInput.addEventListener('input', () => {
-      secret.value = valueInput.value;
-      fitToContent(valueInput);
-      sanitise();
+
+    // A whole `NAME = …` statement keeps its own name, so it's not editable.
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'ph-input';
+    nameInput.value = secret.name;
+    nameInput.spellcheck = false;
+    nameInput.readOnly = Boolean(assignedName(secret.value));
+    nameInput.title = nameInput.readOnly ? 'A whole variable keeps its own name' : 'The name your code will use';
+    nameInput.addEventListener('input', () => {
+      secret.name = nameInput.value;
+      update();
     });
 
-    const phInput = document.createElement('input');
-    phInput.type = 'text';
-    phInput.className = 'ph-input';
-    phInput.value = secret.placeholder;
-    phInput.spellcheck = false;
-    phInput.addEventListener('input', () => {
-      secret.placeholder = phInput.value;
-      sanitise();
+    valueInput.addEventListener('input', () => {
+      secret.value = valueInput.value;
+      const varName = assignedName(secret.value);
+      if (varName) {
+        secret.name = varName;
+        nameInput.value = varName;
+      }
+      nameInput.readOnly = Boolean(varName);
+      fitToContent(valueInput);
+      update();
     });
 
     const hits = document.createElement('span');
     hits.className = 'hit-badge';
-    hits.dataset.hits = 'badge';
 
     const del = document.createElement('button');
     del.className = 'del-btn';
@@ -175,7 +144,10 @@ function renderSecrets() {
     del.textContent = '×';
     del.addEventListener('click', () => removeSecret(secret.id));
 
-    row.append(valueInput, phInput, hits, del);
+    const note = document.createElement('div');
+    note.className = 'row-note hidden';
+
+    row.append(valueInput, nameInput, hits, del, note);
     secretsList.append(row);
     fitToContent(valueInput);
   }
@@ -187,94 +159,113 @@ function fitToContent(textarea) {
   textarea.style.height = `${textarea.scrollHeight + 2}px`;
 }
 
-/** Write the per-row hit counts after a sanitise pass. */
-function updateHitBadges(hitMap) {
+/** Write each row's moved count and any spots that had to stay visible. */
+function updateRows(results) {
   for (const row of secretsList.children) {
-    const id = Number(row.dataset.id);
+    const result = results.get(Number(row.dataset.id)) || { hidden: 0, problems: [] };
     const badge = row.querySelector('.hit-badge');
-    if (!badge) continue;
-    const n = hitMap.get(id) || 0;
-    badge.textContent = String(n);
-    badge.classList.toggle('zero', n === 0);
-    badge.classList.toggle('live', n > 0);
+    badge.textContent = String(result.hidden);
+    badge.classList.toggle('zero', result.hidden === 0);
+    badge.classList.toggle('live', result.hidden > 0);
+
+    const note = row.querySelector('.row-note');
+    const shown = result.problems.slice(0, 3).map((p) => `line ${p.line}: ${p.reason}`);
+    if (result.problems.length > 3) shown.push(`…and ${result.problems.length - 3} more`);
+    note.textContent = shown.length ? `⚠ Left visible — ${shown.join(' · ')}` : '';
+    note.classList.toggle('hidden', shown.length === 0);
   }
 }
 
-// ---------- the core passes ----------
+// ---------- the core pass ----------
 
-function sanitise() {
-  let text = input.value;
-  const hitMap = new Map();
-  let total = 0;
+function update() {
+  const name = moduleName();
+  const nameOk = isValidName(name);
+  moduleNameInput.classList.toggle('invalid', !nameOk);
+  el('module-file-name').textContent = `${name || '?'}.py`;
 
-  for (const secret of secretsByValueLength()) {
-    const { text: next, count } = replaceAllCounted(text, secret.value, secret.placeholder, true);
-    text = next;
-    hitMap.set(secret.id, count);
-    total += count;
+  lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule });
+  output.value = lastResult.code;
+  moduleOutput.value = lastResult.moduleText;
+  updateRows(lastResult.results);
+
+  let moved = 0;
+  let visible = 0;
+  for (const r of lastResult.results.values()) {
+    moved += r.hidden;
+    visible += r.problems.length;
   }
-
-  output.value = text;
-  updateHitBadges(hitMap);
-
-  if (secretsByValueLength().length === 0) {
+  if (!nameOk) {
+    replaceCount.textContent = "⚠ the secrets file name isn't a valid Python name";
+    replaceCount.style.color = 'var(--danger)';
+  } else if (secrets.length === 0) {
     replaceCount.textContent = '';
-  } else if (total === 0) {
+  } else if (moved === 0 && visible === 0) {
     replaceCount.textContent = 'no matches found';
     replaceCount.style.color = 'var(--text-faint)';
   } else {
-    const noun = total === 1 ? 'secret' : 'secrets';
-    replaceCount.textContent = `${total} ${noun} hidden`;
-    replaceCount.style.color = 'var(--good)';
+    replaceCount.textContent = `${moved} moved` + (visible ? ` · ${visible} left visible` : '');
+    replaceCount.style.color = visible ? 'var(--danger)' : 'var(--good)';
   }
 
-  warnDuplicatePlaceholders();
+  el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
 }
 
-function restore() {
-  let text = restoreInput.value;
-  let total = 0;
+// ---------- files ----------
 
-  for (const secret of placeholdersByLength()) {
-    const { text: next, count } = replaceAllCounted(text, secret.placeholder, secret.value);
-    text = next;
-    total += count;
-  }
-
-  restoreOutput.value = text;
-
-  if (secrets.length === 0) {
-    restoreCount.textContent = '';
-    restoreEmptyNote.textContent =
-      '⚠ No secrets are defined yet. Add them in Sanitise mode first so there is something to restore.';
-  } else if (!restoreInput.value) {
-    restoreCount.textContent = '';
-    restoreEmptyNote.textContent = '';
-  } else if (total === 0) {
-    restoreCount.textContent = 'no placeholders found';
-    restoreCount.style.color = 'var(--text-faint)';
-    restoreEmptyNote.textContent = '';
-  } else {
-    const noun = total === 1 ? 'placeholder' : 'placeholders';
-    restoreCount.textContent = `${total} ${noun} restored`;
-    restoreCount.style.color = 'var(--good)';
-    restoreEmptyNote.textContent = '';
-  }
+function showPaths() {
+  const dir = openFile ? openFile.path.replace(/[\\/][^\\/]*$/, '') : '';
+  const sep = openFile && openFile.path.includes('\\') ? '\\' : '/';
+  el('file-path').textContent = openFile ? openFile.path : fileBridge ? 'No file open — paste code or open one' : '';
+  el('output-path').textContent = openFile
+    ? el('tab-module').classList.contains('active')
+      ? `${dir}${sep}${moduleName()}.py`
+      : openFile.path
+    : '';
 }
 
-/** Two secrets sharing one placeholder makes restore ambiguous — flag it. */
-function warnDuplicatePlaceholders() {
-  const seen = new Map();
-  let dupe = null;
-  for (const s of secrets) {
-    if (!s.placeholder) continue;
-    if (seen.has(s.placeholder)) dupe = s.placeholder;
-    seen.set(s.placeholder, true);
+async function loadModule() {
+  existingModule = openFile && isValidName(moduleName()) ? (await fileBridge.readSecrets(openFile.path, moduleName())) || '' : '';
+}
+
+async function openFromDisk() {
+  if (!fileBridge) return;
+  const opened = await fileBridge.open();
+  if (!opened) return;
+  openFile = { path: opened.path, eol: opened.eol };
+  input.value = opened.text;
+  await loadModule();
+  showPaths();
+  update();
+  showToast(existingModule ? `Opened — found ${moduleName()}.py next to it` : 'Opened');
+}
+
+async function save() {
+  if (!fileBridge || !openFile || !lastResult) return;
+  if (lastResult.code === input.value && lastResult.added === 0) {
+    showToast('Nothing to save — add some secrets first');
+    return;
   }
-  if (dupe) {
-    replaceCount.textContent = `⚠ "${dupe}" is used twice — restore will be ambiguous`;
-    replaceCount.style.color = 'var(--danger)';
+  const result = await fileBridge.save({
+    sourcePath: openFile.path,
+    sourceText: lastResult.code,
+    moduleName: moduleName(),
+    secretsText: lastResult.moduleText,
+    eol: openFile.eol
+  });
+  if (result.canceled) return;
+  if (result.error) {
+    showToast(`Couldn't save: ${result.error}`);
+    return;
   }
+  const moved = [...lastResult.results.values()].reduce((n, r) => n + r.hidden, 0);
+  // The file on disk is now the safe version; carry on from there.
+  input.value = lastResult.code;
+  existingModule = lastResult.moduleText;
+  secrets = [];
+  renderSecrets();
+  update();
+  showToast(`Saved — ${moved} ${moved === 1 ? 'secret' : 'secrets'} moved to ${moduleName()}.py`);
 }
 
 // ---------- auto-detect ----------
@@ -350,7 +341,7 @@ function hideSelection() {
   }
   const selected = input.value.slice(start, end).trim();
   if (!selected) return;
-  if (secrets.some((s) => s.value === selected)) {
+  if (secrets.some((s) => s.value.trim() === selected)) {
     showToast('That value is already a secret');
     return;
   }
@@ -358,43 +349,52 @@ function hideSelection() {
   showToast('Selection added as a secret');
 }
 
-// ---------- mode switching ----------
+// ---------- preview tabs ----------
 
-function switchMode(mode) {
-  const sanitiseActive = mode === 'sanitise';
-  el('view-sanitise').classList.toggle('hidden', !sanitiseActive);
-  el('view-restore').classList.toggle('hidden', sanitiseActive);
-  el('tab-sanitise').classList.toggle('active', sanitiseActive);
-  el('tab-restore').classList.toggle('active', !sanitiseActive);
-  el('tab-sanitise').setAttribute('aria-selected', String(sanitiseActive));
-  el('tab-restore').setAttribute('aria-selected', String(!sanitiseActive));
-  if (!sanitiseActive) restore();
+function showPreview(which) {
+  const fileActive = which === 'file';
+  output.classList.toggle('hidden', !fileActive);
+  moduleOutput.classList.toggle('hidden', fileActive);
+  el('tab-file').classList.toggle('active', fileActive);
+  el('tab-module').classList.toggle('active', !fileActive);
+  el('tab-file').setAttribute('aria-selected', String(fileActive));
+  el('tab-module').setAttribute('aria-selected', String(!fileActive));
+  showPaths();
 }
 
 // ---------- wiring ----------
 
 function init() {
-  input.addEventListener('input', sanitise);
-  restoreInput.addEventListener('input', restore);
+  input.addEventListener('input', update);
 
   el('add-secret-btn').addEventListener('click', () => addSecret());
   el('clear-secrets-btn').addEventListener('click', clearSecrets);
   el('detect-btn').addEventListener('click', autoDetect);
+  el('open-btn').addEventListener('click', openFromDisk);
+  el('save-btn').addEventListener('click', save);
 
   el('clear-input-btn').addEventListener('click', () => {
     input.value = '';
-    sanitise();
-  });
-  el('clear-restore-btn').addEventListener('click', () => {
-    restoreInput.value = '';
-    restore();
+    openFile = null;
+    existingModule = '';
+    showPaths();
+    update();
   });
 
-  el('copy-output-btn').addEventListener('click', () => copyText(output.value, 'Sanitised code'));
-  el('copy-restore-btn').addEventListener('click', () => copyText(restoreOutput.value, 'Restored code'));
+  el('copy-output-btn').addEventListener('click', () =>
+    el('tab-module').classList.contains('active')
+      ? copyText(moduleOutput.value, 'Secrets file')
+      : copyText(output.value, 'Safe code')
+  );
 
-  el('tab-sanitise').addEventListener('click', () => switchMode('sanitise'));
-  el('tab-restore').addEventListener('click', () => switchMode('restore'));
+  el('tab-file').addEventListener('click', () => showPreview('file'));
+  el('tab-module').addEventListener('click', () => showPreview('module'));
+
+  moduleNameInput.addEventListener('input', async () => {
+    await loadModule();
+    showPaths();
+    update();
+  });
 
   // Ctrl/Cmd+E on the input adds the current selection as a secret.
   input.addEventListener('keydown', (e) => {
@@ -404,8 +404,10 @@ function init() {
     }
   });
 
+  if (!fileBridge) el('open-btn').disabled = true;
   renderSecrets();
-  sanitise();
+  showPaths();
+  update();
 }
 
 init();

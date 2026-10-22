@@ -1,8 +1,14 @@
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
+const fs = require('fs');
 const path = require('path');
 
 // Keep a global reference so the window isn't garbage-collected.
 let mainWindow = null;
+// The file the user last opened. Saving only ever writes this file and the
+// secrets module next to it.
+let openedPath = null;
+
+const MODULE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -13,8 +19,9 @@ function createWindow() {
     backgroundColor: '#0f1117',
     title: 'Compartmentalise',
     webPreferences: {
-      // This app is pure, offline string manipulation — no Node needed in the
-      // renderer, so lock it down. Secrets never leave the renderer process.
+      // The renderer does only string work; file access goes through the
+      // narrow bridge in preload.js. Nothing is ever sent over the network.
+      preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -81,7 +88,71 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// ---------- file access for the renderer ----------
+
+function secretsPathFor(sourcePath, moduleName) {
+  if (!MODULE_NAME_RE.test(moduleName)) throw new Error(`"${moduleName}" isn't a valid module name`);
+  return path.join(path.dirname(sourcePath), `${moduleName}.py`);
+}
+
+function readText(filePath) {
+  const text = fs.readFileSync(filePath, 'utf8');
+  return { text: text.replace(/\r\n/g, '\n'), eol: text.includes('\r\n') ? '\r\n' : '\n' };
+}
+
+function registerFileHandlers() {
+  ipcMain.handle('file:open', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Open a Python file',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Python', extensions: ['py', 'pyw'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    });
+    if (canceled || filePaths.length === 0) return null;
+    openedPath = filePaths[0];
+    return { path: openedPath, ...readText(openedPath) };
+  });
+
+  ipcMain.handle('file:read-secrets', (_event, sourcePath, moduleName) => {
+    if (sourcePath !== openedPath) return null;
+    const secretsPath = secretsPathFor(sourcePath, moduleName);
+    return fs.existsSync(secretsPath) ? readText(secretsPath).text : null;
+  });
+
+  ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol }) => {
+    try {
+      if (!openedPath || sourcePath !== openedPath) throw new Error('Open the file again before saving');
+      const secretsPath = secretsPathFor(sourcePath, moduleName);
+      if (path.resolve(secretsPath) === path.resolve(sourcePath)) {
+        throw new Error('The secrets file must be a different file from the one you opened');
+      }
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Save', 'Cancel'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Save changes',
+        message: 'Move the secrets out and save?',
+        detail:
+          `This overwrites:\n  ${sourcePath}\n     (secrets removed, imports added)\n\n` +
+          `and writes:\n  ${secretsPath}\n     (keep this one away from AI tools)`
+      });
+      if (response !== 0) return { canceled: true };
+      const toDisk = (text) => (eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text);
+      // Secrets first, so a failure writing the source never loses them.
+      fs.writeFileSync(secretsPath, toDisk(secretsText), 'utf8');
+      fs.writeFileSync(sourcePath, toDisk(sourceText), 'utf8');
+      return { ok: true, secretsPath };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+}
+
 app.whenReady().then(() => {
+  registerFileHandlers();
   buildMenu();
   createWindow();
 

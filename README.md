@@ -1,50 +1,75 @@
 # Compartmentalise
 
-A tiny desktop app for safely sharing code with an AI. Paste your code, mark
-the bits that are secret, and the app swaps every secret for a harmless
-placeholder. Copy the sanitised version into the AI. When the AI replies, paste
-its answer back and the app puts your real secrets back in.
+A tiny desktop app for letting an AI edit your Python code without seeing your
+secrets. Open a file, mark the bits that are secret, and the app moves them
+into a separate file — `hidden_secrets.py` — and rewrites your file to
+`import` them. The rewritten file still runs exactly as before, so an AI can
+read and edit it freely while the real values stay in a file you never give it.
 
-The point: **you never hand your API keys, passwords, hostnames, or anything
-else sensitive to a third-party model.**
+The point: **you never hand your API keys, passwords, hostnames, column names
+or anything else sensitive to a third-party model.**
 
 ## How it works
 
-**Sanitise mode**
+1. Click **Open file…** and pick a `.py` file (or paste code into the left box
+   to try it out).
+2. Add the secrets in the **Secrets** section:
+   - select text in the code and press **Ctrl/Cmd + E**, or
+   - click **+ Add secret** and type or paste it (secrets can span lines), or
+   - click **Auto-detect** to find things that look like secrets (API keys,
+     tokens, emails, IPs, `password = "…"`, JWTs, URLs with credentials).
+     Always review what it finds.
+3. The right box shows what the AI will see. Switch to **Secrets file** to see
+   what goes into `hidden_secrets.py`.
+4. Click **Save**. Your file is rewritten and the secrets are added to
+   `hidden_secrets.py` in the same folder (it's created if needed, and new
+   secrets are added to any already there).
 
-1. Paste your code into the left box.
-2. Add the things you want to hide in the **Secrets** section. Each secret has:
-   - a **value** — the real text to hide (`sk-live-abc123`, a password, a
-     hostname…)
-   - a **placeholder** — what the AI sees instead (auto-filled as
-     `__SECRET_1__`; rename it to something meaningful like `__API_KEY__`).
-3. The right box shows the sanitised code, with a count of how many times each
-   secret was hidden. Click **Copy** and paste it into the AI.
+Each secret has a **name** — what your code uses instead of the real value
+(auto-filled as `SECRET_1`, `SECRET_2`…; rename it to something meaningful).
 
-Secrets match **whole words only**: a secret `abc` hides `abc` on its own (or
-in `x.abc` / `"abc"`), but leaves the first three letters of `abcd` alone.
-Newly added secrets appear at the top of the list. A secret can span several
-lines (press Enter in the value box, or paste multi-line text). Whitespace is
-flexible: any run of spaces, tabs or line breaks in a secret matches any run in
-the code, so a multi-line list still matches if its indentation differs.
+### What gets moved, and how
 
-Shortcuts:
-- Select text in the code box and press **Ctrl/Cmd + E** to add it as a secret.
-- **Auto-detect** scans the pasted code for things that look like secrets
-  (API keys, tokens, emails, IPs, `password = "…"` assignments, JWTs, URLs with
-  credentials) and adds them for you. Always review what it finds.
+| You mark…                                   | Your file becomes…                    | `hidden_secrets.py` gets…   |
+| ------------------------------------------- | ------------------------------------- | --------------------------- |
+| a whole top-level variable `API_KEY = "sk…"` | the line is removed                   | `API_KEY = "sk…"`           |
+| a complete value `["ts_hk", "active_USD"]`  | `cols = COLS`                         | `COLS = ["ts_hk", …]`       |
+| a whole string `"db.internal"`              | `connect(DB_HOST)`                    | `DB_HOST = "db.internal"`   |
+| part of a string: `abc` in `"abcdef"`       | `f"{SECRET_1}def"`                    | `SECRET_1 = "abc"`          |
+| text in a comment or docstring              | the text is replaced by the name      | the text, for reference     |
 
-**Restore mode**
+Every file that uses a secret gets `from hidden_secrets import …` at the top.
 
-Paste the AI's reply (placeholders and all) into the left box and your real
-secrets reappear on the right. Keep the app open between the two steps so it
-remembers your secret list.
+Matching rules:
+- **Inside strings and comments**, a secret matches anywhere — `abc` is found
+  inside `"abcdef"`.
+- **In code**, a secret only matches whole values — `abc` never touches a
+  variable called `abcd`.
+- Spaces, tabs and line breaks are flexible in code, so a multi-line list
+  still matches if its indentation differs from what you typed.
+
+If a spot can't be moved without breaking your code (for example a variable
+inside a function, or a name rather than a value), it is **left as it is and
+listed in red under that secret** so you know the AI will still see it.
+
+## Keep the secrets file away from the AI
+
+Saving puts the real values in `hidden_secrets.py`, so make sure your AI tool
+can't read it and it never ends up in git:
+
+- **git:** add `hidden_secrets.py` to `.gitignore`.
+- **Claude Code:** add a deny rule to `.claude/settings.json`:
+  `{"permissions": {"deny": ["Read(**/hidden_secrets.py)"]}}`
+- **Cursor:** add `hidden_secrets.py` to `.cursorignore`.
+
+You can change the secrets file's name in the box at the top of the Secrets
+section.
 
 ## Privacy
 
-- Secrets live **only in the app window's memory**. Nothing is written to disk
-  and nothing is sent over the network — the app has no network access at all.
-- Closing the app forgets every secret.
+- Nothing is sent over the network — the app has no network access at all.
+- The app only reads the file you open and the secrets file next to it, and
+  only writes those two files when you click **Save** (and confirm).
 
 ## Running it
 
