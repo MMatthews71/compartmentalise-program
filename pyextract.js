@@ -779,8 +779,12 @@
     const fromModule = moduleImportNames(src, tokens, moduleName);
     const variables = [];
     const others = [];
-    const renameOnly = secrets.filter((x) => x.mode === 'rename' && x.value.trim());
-    for (const secret of secrets.filter((x) => x.mode !== 'rename' && x.value.trim())) {
+    // A name this file already imports from the secrets module can't simply
+    // be renamed in place (the module doesn't define the new name), so
+    // renaming it goes the Move out way: the module gains `NEW = OLD`.
+    const inModule = (x) => fromModule.has(x.value.trim()) && moduleDefs.has(x.value.trim());
+    const renameOnly = secrets.filter((x) => x.mode === 'rename' && x.value.trim() && !inModule(x));
+    for (const secret of secrets.filter((x) => (x.mode !== 'rename' || inModule(x)) && x.value.trim())) {
       const value = secret.value.trim();
       const statementForm = ASSIGN_RE.exec(value);
       const name = isValidName(value) ? value : statementForm ? statementForm[1] : '';
