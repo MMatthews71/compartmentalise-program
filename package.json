@@ -1,11 +1,12 @@
 {
   "name": "compartmentalise",
   "version": "1.0.0",
-  "description": "A simple desktop app to redact secrets from code before sharing it with an AI, and restore them afterwards.",
+  "description": "A simple desktop app that moves secrets out of Python files into a private module the code imports, so an AI can edit the code without seeing them.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron . --dev"
+    "dev": "electron . --dev",
+    "test": "node --test"
   },
   "author": "",
   "license": "MIT",
