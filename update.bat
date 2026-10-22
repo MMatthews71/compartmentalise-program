@@ -31,14 +31,19 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM This folder must be a git clone for updates to work. A ZIP download from
-REM GitHub has no link back to the repo, so there is nothing to pull from.
+REM A ZIP download from GitHub has no link back to the repo. Turn the folder
+REM into a git clone in place (this overwrites the app files with the latest
+REM version; node_modules and other untracked files are left alone).
 if not exist ".git" (
-    echo.
-    echo  This folder is not a git clone, so it cannot receive updates.
-    echo  Re-create it with:  git clone https://github.com/MMatthews71/compartmentalise-program.git
-    echo  Starting the current version anyway...
-    echo.
+    echo This folder is not a git clone yet - linking it to GitHub...
+    git init -q
+    git remote add origin https://github.com/MMatthews71/compartmentalise-program.git
+    git fetch origin main
+    if errorlevel 1 goto link_failed
+    git checkout -q -f -B main origin/main
+    if errorlevel 1 goto link_failed
+    git branch -q --set-upstream-to=origin/main main
+    echo Linked and updated to the latest version.
     goto run
 )
 
@@ -58,6 +63,14 @@ if errorlevel 1 (
     REM Remember the upstream so a plain 'git pull' works next time too.
     git branch --set-upstream-to=origin/%BRANCH% %BRANCH% >nul 2>nul
 )
+goto run
+
+:link_failed
+REM Undo the half-made clone so the next run starts fresh.
+rmdir /s /q ".git" 2>nul
+echo.
+echo  Could not link this folder to GitHub ^(see messages above^). Starting the current version.
+echo.
 
 :run
 

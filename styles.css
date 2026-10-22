@@ -278,7 +278,8 @@ textarea.code[readonly] {
   border-bottom: 1px solid #1d212d;
 }
 
-.secret-row input {
+.secret-row input,
+.secret-row textarea {
   width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -291,7 +292,16 @@ textarea.code[readonly] {
   user-select: text;
 }
 
-.secret-row input:focus {
+.secret-row textarea.value-input {
+  display: block;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.secret-row input:focus,
+.secret-row textarea:focus {
   border-color: var(--accent);
 }
 
