@@ -37,20 +37,25 @@ function escapeRegExp(str) {
 
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
-/** Regex source matching `find` only as a whole word: if it starts (or ends)
- *  with a letter, digit or underscore, the neighbouring character must not be
- *  one. So "abc" matches in "x = abc;" but not inside "abcd" or "xabc". */
-function wholeWordSource(find) {
-  const before = WORD_CHAR.test(find[0]) ? '(?<![\\p{L}\\p{N}_])' : '';
-  const after = WORD_CHAR.test(find[find.length - 1]) ? '(?![\\p{L}\\p{N}_])' : '';
-  return before + escapeRegExp(find) + after;
+/** Regex source for matching a secret in code.
+ *  - Whole word only: if it starts (or ends) with a letter, digit or
+ *    underscore, the neighbouring character must not be one. So "abc" matches
+ *    in "x = abc;" but not inside "abcd" or "xabc".
+ *  - Whitespace-tolerant: leading/trailing whitespace is ignored and any run
+ *    of spaces, tabs or newlines matches any other run, so a multi-line secret
+ *    still matches when its indentation differs from the code's. */
+function secretSource(find) {
+  const core = find.trim();
+  const before = WORD_CHAR.test(core[0]) ? '(?<![\\p{L}\\p{N}_])' : '';
+  const after = WORD_CHAR.test(core[core.length - 1]) ? '(?![\\p{L}\\p{N}_])' : '';
+  return before + core.split(/\s+/).map(escapeRegExp).join('\\s+') + after;
 }
 
 /** Replace every occurrence of `find` with `replace`, returning text + count.
- *  With `wholeWord`, occurrences embedded in a longer word are left alone. */
-function replaceAllCounted(text, find, replace, wholeWord = false) {
-  if (!find) return { text, count: 0 };
-  const source = wholeWord ? wholeWordSource(find) : escapeRegExp(find);
+ *  With `asSecret`, matching follows secretSource's rules above. */
+function replaceAllCounted(text, find, replace, asSecret = false) {
+  if (!(asSecret ? find.trim() : find)) return { text, count: 0 };
+  const source = asSecret ? secretSource(find) : escapeRegExp(find);
   const re = new RegExp(source, 'gu');
   let count = 0;
   const result = text.replace(re, () => {

@@ -24,7 +24,9 @@ else sensitive to a third-party model.**
 Secrets match **whole words only**: a secret `abc` hides `abc` on its own (or
 in `x.abc` / `"abc"`), but leaves the first three letters of `abcd` alone.
 Newly added secrets appear at the top of the list. A secret can span several
-lines (press Enter in the value box, or paste multi-line text).
+lines (press Enter in the value box, or paste multi-line text). Whitespace is
+flexible: any run of spaces, tabs or line breaks in a secret matches any run in
+the code, so a multi-line list still matches if its indentation differs.
 
 Shortcuts:
 - Select text in the code box and press **Ctrl/Cmd + E** to add it as a secret.
