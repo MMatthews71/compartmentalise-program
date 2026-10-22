@@ -11,7 +11,7 @@
 
 const IS_MAC = navigator.platform.toUpperCase().includes('MAC');
 const MOD_KEY = IS_MAC ? 'Cmd' : 'Ctrl';
-const { extract, suggestName, assignedName, isValidName } = window.PyExtract;
+const { extract, suggestName, variableName, isValidName } = window.PyExtract;
 // Only there when running inside the desktop app.
 const fileBridge = window.files || null;
 
@@ -70,7 +70,7 @@ function moduleName() {
 // ---------- secrets model ----------
 
 function addSecret(value = '') {
-  const name = assignedName(value) || suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
+  const name = variableName(value, input.value) || suggestName(new Set(secrets.map((s) => s.name)), input.value, existingModule);
   // Newest first, so a freshly added row is always visible at the top.
   secrets.unshift({ id: nextId++, value, name });
   renderSecrets();
@@ -110,13 +110,13 @@ function renderSecrets() {
     valueInput.value = secret.value;
     valueInput.spellcheck = false;
 
-    // A whole `NAME = …` statement keeps its own name, so it's not editable.
+    // A whole variable keeps its own name, so it's not editable.
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
     nameInput.className = 'ph-input';
     nameInput.value = secret.name;
     nameInput.spellcheck = false;
-    nameInput.readOnly = Boolean(assignedName(secret.value));
+    nameInput.readOnly = Boolean(variableName(secret.value, input.value));
     nameInput.title = nameInput.readOnly ? 'A whole variable keeps its own name' : 'The name your code will use';
     nameInput.addEventListener('input', () => {
       secret.name = nameInput.value;
@@ -125,7 +125,7 @@ function renderSecrets() {
 
     valueInput.addEventListener('input', () => {
       secret.value = valueInput.value;
-      const varName = assignedName(secret.value);
+      const varName = variableName(secret.value, input.value);
       if (varName) {
         secret.name = varName;
         nameInput.value = varName;
@@ -216,11 +216,12 @@ function update() {
 function showPaths() {
   const dir = openFile ? openFile.path.replace(/[\\/][^\\/]*$/, '') : '';
   const sep = openFile && openFile.path.includes('\\') ? '\\' : '/';
-  el('file-path').textContent = openFile ? openFile.path : fileBridge ? 'No file open — paste code or open one' : '';
+  // The path boxes trim long paths from the left (CSS direction: rtl); the
+  // left-to-right marks keep slashes on the correct side.
+  const ltr = (text) => (text ? `\u200e${text}\u200e` : '');
+  el('file-path').textContent = openFile ? ltr(openFile.path) : fileBridge ? 'No file open — paste code or open one' : '';
   el('output-path').textContent = openFile
-    ? el('tab-module').classList.contains('active')
-      ? `${dir}${sep}${moduleName()}.py`
-      : openFile.path
+    ? ltr(el('tab-module').classList.contains('active') ? `${dir}${sep}${moduleName()}.py` : openFile.path)
     : '';
 }
 

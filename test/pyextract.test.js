@@ -111,7 +111,7 @@ test('signed numbers only when they are a value', (t) => {
 });
 
 test('unsafe spots are left alone and reported', (t) => {
-  const src = 'def f():\n    TOKEN = "abc"\n    return TOKEN\nabc = 2\nd = {"k": 1}\nd["k"]\ny = "\\nabc"\n';
+  const src = 'def f():\n    TOKEN = "abc"\n    return TOKEN\ndef g(abc):\n    return abc\nd = {"k": 1}\nd["k"]\ny = "\\nabc"\n';
   const out = check(t, src, secretsOf(['TOKEN = "abc"'], ['abc'], ['["k"]']), 2);
   const reasons = [...out.results.values()].flatMap((r) => r.problems.map((p) => p.reason));
   assert.ok(reasons.some((r) => /indented/.test(r)), reasons.join('; '));
@@ -166,4 +166,39 @@ test('f-string format specs and conversions are left alone', () => {
   const out = extract('x = 1\ny = f"{x!r:abc}"\n', secretsOf(['abc']));
   assert.strictEqual(out.results.get(1).hidden, 0);
   assert.match(out.results.get(1).problems[0].reason, /f-string/);
+});
+
+test('a variable name on its own moves its whole definition', (t) => {
+  const src = [
+    'import math',
+    'n = 12',
+    'MONTH_CODES = {',
+    '    1: "F", 2: "G", 3: "H",  # winter',
+    '}',
+    'LOOKUP = dict(zip(range(n), "FGHJKMNQUVXZ"))',
+    'ROOT = math.sqrt(n)',
+    'label = f"{MONTH_CODES[1]} of {len(MONTH_CODES)}"',
+    ''
+  ].join('\n');
+  const out = check(t, src, secretsOf(['MONTH_CODES'], ['LOOKUP'], ['ROOT']), 1);
+  assert.match(out.code, /^from hidden_secrets import MONTH_CODES$/m);
+  assert.match(out.code, /^label = f"\{MONTH_CODES\[1\]\} of \{len\(MONTH_CODES\)\}"$/m, 'uses stay as they are');
+  assert.match(out.moduleText, /^MONTH_CODES = \{\n    1: "F", 2: "G", 3: "H",  # winter\n\}$/m);
+  const reasons = [...out.results.values()].flatMap((r) => r.problems.map((p) => p.reason));
+  assert.ok(reasons.some((r) => /LOOKUP uses n, which stays in your file/.test(r)), reasons.join('; '));
+  assert.ok(reasons.some((r) => /ROOT uses n/.test(r)), reasons.join('; '));
+});
+
+test('dependencies move together, with the imports they need', (t) => {
+  const src = 'import math\nfrom os import path as p\nn = 12\nLOOKUP = dict(zip(range(n), "FGHJKMNQUVXZ"))\nROOT = math.sqrt(n)\nSEP = p.sep\nboth = (LOOKUP, ROOT, SEP)\n';
+  const out = check(t, src, secretsOf(['LOOKUP'], ['ROOT'], ['n'], ['SEP']), 4);
+  assert.match(out.code, /^from hidden_secrets import n, LOOKUP, ROOT, SEP$/m);
+  assert.match(out.moduleText, /\nn = 12\nLOOKUP = dict\(zip\(range\(n\), "FGHJKMNQUVXZ"\)\)\nimport math\nROOT = math.sqrt\(n\)\nfrom os import path as p\nSEP = p.sep\n$/);
+});
+
+test('variables set more than once, or earlier in a block, stay put', () => {
+  const twice = extract('X = 1\nX = 2\n', secretsOf(['X']));
+  assert.match(twice.results.get(1).problems[0].reason, /more than once/);
+  const earlier = extract('if True:\n    X = 0\nX = 1\n', secretsOf(['X']));
+  assert.match(earlier.results.get(1).problems[0].reason, /set earlier/);
 });

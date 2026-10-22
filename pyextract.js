@@ -123,16 +123,21 @@
         // f"{x=}": the = asks Python to print the expression; it isn't part of it.
         const debug = /(?<![=!<>])=\s*$/.exec(src.slice(j + 1, inner.end));
         const exprEnd = debug ? j + 1 + debug.index : inner.end;
-        // Skip any !conversion or :format spec to the closing brace.
+        const field = { open: j, start: j + 1, end: exprEnd, close: n, debug: Boolean(debug) };
+        fields.push(field);
+        // Skip any !conversion or :format spec to the closing brace; a spec
+        // can hold {fields} of its own, as in f"{x:{width}d}".
         let k = inner.end;
-        let depth = 0;
-        for (; k < n; k++) {
-          const x = src[k];
-          if (oneLine && x === '\n') break;
-          if (x === '{') depth++;
-          else if (x === '}' && depth-- === 0) break;
+        while (k < n && src[k] !== '}' && !(oneLine && src[k] === '\n')) {
+          if (src[k] === '{') {
+            const spec = lexCode(src, k + 1, true, oneLine);
+            children.push(...spec.tokens);
+            fields.push({ open: k, start: k + 1, end: spec.end, close: spec.end + 1, debug: false });
+            k = spec.end;
+          }
+          k++;
         }
-        fields.push({ open: j, start: j + 1, end: exprEnd, close: Math.min(k + 1, n), debug: Boolean(debug) });
+        field.close = Math.min(k + 1, n);
         j = src[k] === '}' ? k + 1 : k;
         continue;
       }
@@ -481,6 +486,131 @@
     return src.slice(0, pos) + lead + formatImport(moduleName, names) + '\n' + gap + src.slice(pos);
   }
 
+  // ---------- whole variables ----------
+
+  // Builtins a moved definition may use: they mean the same thing in the
+  // secrets module. (Ones with side effects, like print or open, aren't here.)
+  const BUILTINS = new Set(
+    ('abs all any ascii bin bool bytearray bytes callable chr complex dict divmod enumerate filter ' +
+      'float format frozenset getattr hasattr hash hex id int isinstance issubclass iter len list map ' +
+      'max min next object oct ord pow range repr reversed round set slice sorted str sum tuple type zip').split(' ')
+  );
+
+  /** Every logical line, as { s, e }: split at newlines that aren't inside
+   *  brackets, strings or a backslash continuation. */
+  function statements(src, tokens) {
+    const stmts = [];
+    let depth = 0;
+    let start = 0;
+    const close = (i) => {
+      if (src.slice(start, i).trim()) stmts.push({ s: start, e: i });
+      start = i + 1;
+    };
+    walk(
+      src,
+      tokens,
+      0,
+      src.length,
+      (i) => {
+        const c = src[i];
+        if ('([{'.includes(c)) depth++;
+        else if (')]}'.includes(c)) depth = Math.max(0, depth - 1);
+        else if (c === '\n' && depth === 0 && src[i - 1] !== '\\') close(i);
+      },
+      () => {}
+    );
+    close(src.length);
+    return stmts;
+  }
+
+  /** Top-level (unindented) statements. */
+  function topLevel(src, tokens) {
+    return statements(src, tokens).filter((st) => /\S/.test(src[st.s]));
+  }
+
+  /** Top-level `NAME = …` statements: { name, s, e, valueAt }. */
+  function topLevelAssignments(src, stmts) {
+    const found = [];
+    for (const st of stmts) {
+      const m = ASSIGN_RE.exec(src.slice(st.s, st.e));
+      if (m) found.push({ name: m[1], s: st.s, e: st.e, valueAt: st.s + m[0].length });
+    }
+    return found;
+  }
+
+  /** Names bound by top-level imports -> the import line that binds them, to
+   *  copy into the secrets module (null for relative imports, which can't
+   *  be copied). The secrets module's own import is skipped. */
+  function topLevelImports(src, stmts, moduleName) {
+    const found = new Map();
+    for (const st of stmts) {
+      const text = src.slice(st.s, st.e).replace(/#[^\n]*/g, '');
+      let m;
+      if ((m = /^import\s+([\s\S]+)$/.exec(text))) {
+        for (const part of m[1].replace(/\\/g, ' ').split(',')) {
+          const p = /^([\w.]+)(?:\s+as\s+(\w+))?$/.exec(part.trim());
+          if (p) found.set(p[2] || p[1].split('.')[0], `import ${p[1]}${p[2] ? ` as ${p[2]}` : ''}`);
+        }
+      } else if ((m = /^from\s+(\S+)\s+import\s+([\s\S]+)$/.exec(text)) && m[1] !== moduleName) {
+        for (const part of m[2].replace(/[()\\]/g, ' ').split(',')) {
+          const p = /^(\w+)(?:\s+as\s+(\w+))?$/.exec(part.trim());
+          if (p) found.set(p[2] || p[1], m[1].startsWith('.') ? null : `from ${m[1]} import ${p[0]}`);
+        }
+      }
+    }
+    return found;
+  }
+
+  /** The code in [s, e) with strings blanked out, but f-string {fields} kept. */
+  function codeOnly(src, tokens, s, e) {
+    let out = '';
+    walk(
+      src,
+      tokens,
+      s,
+      e,
+      (i) => {
+        out += src[i];
+      },
+      (t) => {
+        out += ' ';
+        for (const f of t.fields || []) out += ` (${codeOnly(src, t.children, f.start, f.end)}) `;
+      }
+    );
+    return out;
+  }
+
+  /** Names an expression looks up: not attributes (x.name), keyword
+   *  arguments (f(name=…)), or names it binds itself (comprehension
+   *  variables, lambda parameters, :=). */
+  function freeNames(code) {
+    const bound = new Set();
+    const idents = (text) => text.match(/[A-Za-z_]\w*/g) || [];
+    for (const m of code.matchAll(/\bfor\s+([\w\s,()]+?)\s+in\b/g)) idents(m[1]).forEach((n) => bound.add(n));
+    for (const m of code.matchAll(/\blambda\b([^:]*):/g)) idents(m[1]).forEach((n) => bound.add(n));
+    for (const m of code.matchAll(/([A-Za-z_]\w*)\s*:=/g)) bound.add(m[1]);
+    const names = new Set();
+    for (const m of code.matchAll(/(\.\s*)?(?<!\w)([A-Za-z_]\w*)(\s*=(?!=))?/g)) {
+      if (!m[1] && !m[3] && !KEYWORDS.has(m[2]) && !bound.has(m[2])) names.add(m[2]);
+    }
+    return names;
+  }
+
+  /** Why a definition's value can't simply be moved, or ''. */
+  function valueShapeProblem(code) {
+    let depth = 0;
+    for (let i = 0; i < code.length; i++) {
+      const c = code[i];
+      if ('([{'.includes(c)) depth++;
+      else if (')]}'.includes(c)) depth--;
+      else if (depth === 0 && c === ';') return 'shares its line with another statement';
+      else if (depth === 0 && c === '=' && !/[=!<>:]/.test(code[i - 1] || '') && code[i + 1] !== '=') {
+        return 'is a chained assignment (a = b = …)';
+      }
+    }
+    return '';
+  }
+
   // ---------- main entry ----------
 
   /**
@@ -504,20 +634,21 @@
     const stringOccs = new Map(); // string token -> { scope, k, occs: [{ s, e, name }] }
     const imported = new Set();
     const taken = new Map(moduleDefs); // name -> value key, for this run
-    const newDefs = []; // { name, text }
+    const newDefs = []; // { name, text, pos, needs: [import lines] }
     const lineOf = (pos) => src.slice(0, pos).split('\n').length;
     const overlaps = (s, e) => consumed.some(([a, b]) => s < b && e > a);
 
     /** Name to store `key` under: `base` if free (or already holding the
      *  same value), else base_2, base_3… Fixed names (real variables) never
      *  change, so a clash comes back as null. `define(name)` gives the line
-     *  to write to the module for a new name. */
-    function allocate(base, key, define, fixed) {
+     *  to write to the module for a new name; `pos` orders it there, and
+     *  `needs` lists import lines it depends on. */
+    function allocate(base, key, define, fixed, pos, needs = []) {
       for (let n = 1; ; n++) {
         const name = n === 1 ? base : `${base}_${n}`;
         if (!taken.has(name)) {
           taken.set(name, key);
-          newDefs.push({ name, text: define(name) });
+          newDefs.push({ name, text: define(name), pos, needs });
           return name;
         }
         if (taken.get(name) === key) return name;
@@ -525,9 +656,83 @@
       }
     }
 
-    const ordered = secrets
-      .filter((x) => x.value.trim())
-      .sort((a, b) => b.value.trim().length - a.value.trim().length);
+    // Whole variables first: a secret that is a top-level variable's name,
+    // or its whole `NAME = …` statement, moves that statement to the module.
+    const topStmts = topLevel(src, tokens);
+    const assigns = topLevelAssignments(src, topStmts);
+    const imports = topLevelImports(src, topStmts, moduleName);
+    const definedHere = new Set([...assigns.map((a) => a.name), ...imports.keys()]);
+    for (const st of topStmts) {
+      const m = /^(?:async\s+)?def\s+(\w+)|^class\s+(\w+)/.exec(src.slice(st.s, st.e));
+      if (m) definedHere.add(m[1] || m[2]);
+    }
+    const variables = [];
+    const others = [];
+    for (const secret of secrets.filter((x) => x.value.trim())) {
+      const value = secret.value.trim();
+      const statementForm = ASSIGN_RE.exec(value);
+      const name = isValidName(value) ? value : statementForm ? statementForm[1] : '';
+      const defs = assigns.filter((a) => a.name === name);
+      if (defs.length === 0) {
+        others.push(secret);
+        continue;
+      }
+      const result = { hidden: 0, problems: [] };
+      results.set(secret.id, result);
+      const a = defs[0];
+      const v = { result, name, a, deps: new Set(), problem: '' };
+      variables.push(v);
+      // Set earlier inside an if/for/try block? Then moving the top-level
+      // one to the very start would change which value wins.
+      const indentedSet = new RegExp(`^[ \\t]+${name}[ \\t]*(?::[^=\\n]*)?=(?!=)`, 'gm');
+      const setEarlier = [...src.slice(0, a.s).matchAll(indentedSet)].some((x) => locate(tokens, x.index).k === -1);
+      const code = codeOnly(src, tokens, a.valueAt, a.e);
+      if (variables.some((x) => x !== v && x.name === name)) v.problem = 'is the same variable as another secret';
+      else if (defs.length > 1) v.problem = `${name} is set more than once at the top level, so it can't be moved`;
+      else if (setEarlier) v.problem = `${name} is also set earlier in the file, so moving it would change things`;
+      else if (statementForm && normaliseExpr(value) !== normaliseExpr(src.slice(a.s, a.e))) {
+        v.problem = "isn't the whole statement — select all of it, or just type the variable's name";
+      } else if ((v.problem = valueShapeProblem(code))) v.problem = `${name} ${v.problem}`;
+      else if (moduleDefs.has(name) && moduleDefs.get(name) !== normaliseExpr(src.slice(a.valueAt, a.e))) {
+        v.problem = `${name} is already in ${moduleName}.py with a different value`;
+      }
+      v.deps = freeNames(code);
+    }
+    // A definition can only move if everything it uses will exist in the
+    // module too: builtins, copied imports, or other variables moving with it.
+    for (let changed = true; changed; ) {
+      changed = false;
+      const moving = new Set(variables.filter((v) => !v.problem).map((v) => v.name));
+      for (const v of variables) {
+        if (v.problem) continue;
+        const missing = [...v.deps].find(
+          (d) =>
+            d === v.name ||
+            !(moduleDefs.has(d) || moving.has(d) || imports.get(d) || (BUILTINS.has(d) && !definedHere.has(d)))
+        );
+        if (missing === undefined) continue;
+        v.problem =
+          imports.get(missing) === null
+            ? `${v.name} uses ${missing}, which comes from a relative import — move it by hand`
+            : `${v.name} uses ${missing}, which stays in your file — add ${missing} as a secret too, or move it by hand`;
+        changed = true;
+      }
+    }
+    for (const v of variables) {
+      if (v.problem) {
+        v.result.problems.push({ line: lineOf(v.a.s), reason: v.problem });
+        continue;
+      }
+      const needs = [...v.deps].filter((d) => !moduleDefs.has(d) && imports.get(d)).map((d) => imports.get(d));
+      const key = normaliseExpr(src.slice(v.a.valueAt, v.a.e));
+      allocate(v.name, key, () => src.slice(v.a.s, v.a.e), true, v.a.s, needs);
+      edits.push({ s: v.a.s, e: src[v.a.e] === '\n' ? v.a.e + 1 : v.a.e, text: '' });
+      imported.add(v.name);
+      consumed.push([v.a.s, v.a.e]);
+      v.result.hidden = 1;
+    }
+
+    const ordered = others.sort((a, b) => b.value.trim().length - a.value.trim().length);
 
     for (const secret of ordered) {
       const result = { hidden: 0, problems: [] };
@@ -583,9 +788,13 @@
       // Spots that can't work go last, so they never block one that can.
       candidates.sort((a, b) => (a.where === 'partial') - (b.where === 'partial') || a.s - b.s);
 
+      const seen = []; // spots of this secret already handled or reported
       for (const c of candidates) {
         if (overlaps(c.s, c.e)) continue;
+        const repeat = seen.some(([a, b]) => c.s < b && c.e > a);
+        seen.push([c.s, c.e]);
         if (c.where === 'partial') {
+          if (repeat) continue;
           problem(c.s, 'starts or ends part-way through a string — select the whole string, or only text inside it');
           continue;
         }
@@ -609,33 +818,13 @@
           const assign = ASSIGN_RE.exec(text);
           const lineStart = src.lastIndexOf('\n', c.s - 1) + 1;
           if (assign && !src.slice(lineStart, c.s).trim()) {
-            // A whole variable: move the statement, import the name.
-            if (c.s !== lineStart) {
-              problem(c.s, 'is indented — only top-level variables can be moved out');
-              continue;
-            }
-            const nl = src.indexOf('\n', c.e);
-            const restEnd = nl === -1 ? src.length : nl;
-            if (!/^[ \t]*(?:#.*)?$/.test(src.slice(c.e, restEnd))) {
-              problem(c.s, "isn't the whole statement — select to the end of the line");
-              continue;
-            }
-            const why = literalProblem(src, c.scope, c.s + assign[0].length, c.e);
-            if (why) {
-              problem(c.s, `${assign[1]}'s value ${why}`);
-              continue;
-            }
-            const varName = assign[1];
-            const key = normaliseExpr(text.slice(assign[0].length));
-            if (!allocate(varName, key, () => text, true)) {
-              problem(c.s, `${varName} is already in ${moduleName}.py with a different value`);
-              continue;
-            }
-            const blankRest = /^[ \t]*$/.test(src.slice(c.e, restEnd));
-            edits.push({ s: c.s, e: blankRest && nl !== -1 ? nl + 1 : c.e, text: '' });
-            imported.add(varName);
-            consumed.push([c.s, c.e]);
-            result.hidden++;
+            // Top-level variables were handled above; this one isn't one.
+            problem(
+              c.s,
+              c.s !== lineStart
+                ? 'is indented — only top-level variables can be moved out'
+                : 'is inside brackets, not a variable of its own'
+            );
             continue;
           }
           const why = literalProblem(src, c.scope, c.s, c.e) || surroundingsProblem(src, c.scope, c.s, c.e);
@@ -681,7 +870,7 @@
           const quote = /["'\\\n]/.test(text) ? t.quote : '"';
           stored = prefix + quote + text + quote;
         } else stored = JSON.stringify(text);
-        const name = allocate(base, normaliseExpr(stored), (n) => `${n} = ${stored}`, false);
+        const name = allocate(base, normaliseExpr(stored), (n) => `${n} = ${stored}`, false, c.s);
 
         if (c.where === 'code') {
           edits.push({ s: c.s, e: c.e, text: name });
@@ -708,14 +897,28 @@
     let code = src;
     for (const ed of edits) code = code.slice(0, ed.s) + ed.text + code.slice(ed.e);
 
-    const usedNames = [...imported].filter((n) => newDefs.some((d) => d.name === n) || moduleDefs.has(n));
+    // Imported in the order they appear in the file.
+    const posOf = new Map(newDefs.map((d) => [d.name, d.pos]));
+    const usedNames = [...imported]
+      .filter((n) => posOf.has(n) || moduleDefs.has(n))
+      .sort((a, b) => (posOf.get(a) ?? -1) - (posOf.get(b) ?? -1));
     code = addImport(code, moduleName, usedNames);
 
     let moduleText = existingModule || '';
     if (newDefs.length) {
       if (!moduleText.trim()) moduleText = MODULE_HEADER;
       if (!moduleText.endsWith('\n')) moduleText += '\n';
-      moduleText += '\n' + newDefs.map((d) => d.text).join('\n') + '\n';
+      // In file order, so a definition comes after anything it uses.
+      const have = new Set(moduleText.split('\n').map((l) => l.trim()));
+      const lines = [];
+      for (const d of newDefs.sort((a, b) => a.pos - b.pos)) {
+        for (const line of d.needs) {
+          if (!have.has(line)) lines.push(line);
+          have.add(line);
+        }
+        lines.push(d.text);
+      }
+      moduleText += '\n' + lines.join('\n') + '\n';
     }
 
     return { code, moduleText, results, added: newDefs.length };
@@ -731,13 +934,17 @@
     }
   }
 
-  /** The variable name if `value` is a `NAME = …` statement, else ''. */
-  function assignedName(value) {
-    const m = ASSIGN_RE.exec(value.trim());
-    return m ? m[1] : '';
+  /** The variable a secret moves out whole, or '': a `NAME = …` statement,
+   *  or a name that's set at the top level of `src`. */
+  function variableName(value, src = '') {
+    const v = value.trim();
+    const m = ASSIGN_RE.exec(v);
+    if (m) return m[1];
+    if (!isValidName(v)) return '';
+    return topLevelAssignments(src, topLevel(src, lex(src))).some((a) => a.name === v) ? v : '';
   }
 
-  const api = { extract, suggestName, assignedName, isValidName, lex, locate, parseModule };
+  const api = { extract, suggestName, variableName, isValidName, lex, locate, parseModule };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PyExtract = api;
 })(typeof window !== 'undefined' ? window : globalThis);

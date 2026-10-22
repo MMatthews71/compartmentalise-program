@@ -32,6 +32,7 @@ Each secret has a **name** — what your code uses instead of the real value
 
 | You mark…                                   | Your file becomes…                    | `hidden_secrets.py` gets…   |
 | ------------------------------------------- | ------------------------------------- | --------------------------- |
+| a variable's name on its own: `MONTH_CODES` | its definition is removed; uses stay  | `MONTH_CODES = {…}`         |
 | a whole top-level variable `API_KEY = "sk…"` | the line is removed                   | `API_KEY = "sk…"`           |
 | a complete value `["ts_hk", "active_USD"]`  | `cols = COLS`                         | `COLS = ["ts_hk", …]`       |
 | a whole string `"db.internal"`              | `connect(DB_HOST)`                    | `DB_HOST = "db.internal"`   |
@@ -40,6 +41,13 @@ Each secret has a **name** — what your code uses instead of the real value
 | text in a comment or docstring              | the text is replaced by the name      | the text, for reference     |
 
 Every file that uses a secret gets `from hidden_secrets import …` at the top.
+
+A moved variable can be built from anything the secrets file can also see:
+plain values, Python builtins (`dict`, `zip`, `range`, …), modules your file
+imports at the top (the import line is copied across), and other variables
+you move at the same time. If it uses something that stays in your file — say
+`LOOKUP = dict(zip(range(n), …))` with `n` defined in your file — you're told
+which name to add as a secret too.
 
 Matching rules:
 - **Inside strings and comments**, a secret matches anywhere — `abc` is found
@@ -50,7 +58,7 @@ Matching rules:
   still matches if its indentation differs from what you typed.
 
 If a spot can't be moved without breaking your code (for example a variable
-inside a function, a name rather than a value, or an f-string `{x=}` that
+inside a function, one that's set more than once, a name rather than a value, or an f-string `{x=}` that
 prints its own code), it is **left as it is and
 listed in red under that secret** so you know the AI will still see it.
 
