@@ -8,6 +8,8 @@ let mainWindow = null;
 // secrets module next to it, and other .py files read from its folder.
 let openedPath = null;
 let folderPaths = new Set();
+// Set by the renderer while it holds secrets that haven't been saved yet.
+let unsaved = false;
 
 const MODULE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -44,6 +46,21 @@ function createWindow() {
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
+
+  // Don't lose secrets that were added but never saved.
+  mainWindow.on('close', (event) => {
+    if (!unsaved) return;
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning',
+      buttons: ['Quit without saving', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Unsaved secrets',
+      message: "You've added secrets that haven't been saved.",
+      detail: 'Quit anyway? They will be lost (nothing has been changed on disk).'
+    });
+    if (choice !== 0) event.preventDefault();
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -126,6 +143,33 @@ function pythonFilesUnder(dir, found = []) {
   return found;
 }
 
+// ---------- recent files ----------
+// Only paths and secrets-file names are remembered — never secret values,
+// which live in the secrets file and nowhere else.
+
+const MAX_RECENT = 10;
+const recentFile = () => path.join(app.getPath('userData'), 'recent.json');
+
+function readRecent() {
+  try {
+    const list = JSON.parse(fs.readFileSync(recentFile(), 'utf8'));
+    return Array.isArray(list) ? list.filter((r) => r && typeof r.path === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberRecent(filePath, moduleName) {
+  const list = readRecent().filter((r) => path.resolve(r.path) !== path.resolve(filePath));
+  list.unshift({ path: filePath, moduleName: MODULE_NAME_RE.test(moduleName || '') ? moduleName : 'hidden_secrets' });
+  try {
+    fs.mkdirSync(path.dirname(recentFile()), { recursive: true });
+    fs.writeFileSync(recentFile(), JSON.stringify(list.slice(0, MAX_RECENT), null, 2));
+  } catch {
+    // Not being able to remember is no reason to fail.
+  }
+}
+
 function registerFileHandlers() {
   ipcMain.handle('file:open', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -139,6 +183,25 @@ function registerFileHandlers() {
     if (canceled || filePaths.length === 0) return null;
     openedPath = filePaths[0];
     return { path: openedPath, ...readText(openedPath) };
+  });
+
+  // Recent files that still exist, most recent first.
+  ipcMain.handle('recent:list', () => readRecent().filter((r) => fs.existsSync(r.path)));
+
+  ipcMain.handle('recent:remember', (_event, filePath, moduleName) => {
+    if (filePath === openedPath) rememberRecent(filePath, moduleName);
+  });
+
+  // Reopen a file from the recent list (only those — no arbitrary paths).
+  ipcMain.handle('file:open-recent', (_event, filePath) => {
+    if (!readRecent().some((r) => path.resolve(r.path) === path.resolve(filePath))) return null;
+    if (!fs.existsSync(filePath)) return null;
+    openedPath = filePath;
+    return { path: openedPath, ...readText(openedPath) };
+  });
+
+  ipcMain.handle('app:set-unsaved', (_event, value) => {
+    unsaved = Boolean(value);
   });
 
   // The other Python files in the opened file's folder (and below), so files

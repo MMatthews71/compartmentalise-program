@@ -28,6 +28,9 @@
           <div class="panel-head">
             <h2>1 · Your Python file</h2>
             <div class="panel-actions">
+              <select id="recent-select" class="recent-select" title="Reopen a file you opened before">
+                <option value="">Recent…</option>
+              </select>
               <button id="open-btn" class="btn" title="Open a .py file from disk">Open file…</button>
               <button id="restore-names-btn" class="btn ghost" title="Undo the renames noted in the secrets file">
                 Put names back
@@ -88,6 +91,10 @@
           </div>
           <div id="secrets-list"></div>
         </div>
+        <details id="earlier" class="earlier hidden">
+          <summary>Hidden earlier (<span id="earlier-count">0</span>) — already in the secrets file</summary>
+          <div id="earlier-list"></div>
+        </details>
         <p class="privacy-note">
           🔒 Nothing is sent anywhere. <b>Save</b> rewrites your file to import its secrets, and puts the real values in
           <code id="module-file-name">hidden_secrets.py</code> next to it. Keep that file away from AI tools and out of git.

@@ -56,6 +56,19 @@ you move at the same time. If it uses something that stays in your file — say
 `LOOKUP = dict(zip(range(n), …))` with `n` defined in your file — you're told
 which name to add as a secret too.
 
+### Picking up where you left off
+
+The app remembers the files you open. Next time you start it, it reopens the
+last one (fresh from disk), and the **Recent** list next to **Open file…**
+takes you back to the others — each with the secrets file name it used.
+
+After you save, the secrets you added are in the secrets file, so the list
+clears. When you open the file again, **Hidden earlier** shows what it already
+hides — each name your code uses, what it really is, and its value — and what
+it has renamed.
+
+If you close the app with secrets you added but haven't saved, it asks first.
+
 ### Rename only
 
 Sometimes you don't need to hide a value — you just don't want the AI to know
@@ -127,8 +140,11 @@ section.
 ## Privacy
 
 - Nothing is sent over the network — the app has no network access at all.
-- The app only reads the file you open and the secrets file next to it, and
-  only writes those two files when you click **Save** (and confirm).
+- The app only reads the file you open, the secrets file next to it and the
+  other `.py` files in that folder, and only writes them when you click
+  **Save** (and confirm).
+- To reopen your work, the app remembers the **paths** of recent files (in its
+  own settings folder) — never secret values, which stay in the secrets file.
 
 ## Running it
 

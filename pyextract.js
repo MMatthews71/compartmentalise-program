@@ -1276,6 +1276,25 @@
     return out;
   }
 
+  /**
+   * What `src` already hides, from earlier saves: names it imports from the
+   * secrets module (with their real name and value) and names it renamed.
+   * Returns [{ name, realName, value, kind: 'moved' | 'renamed' }].
+   */
+  function hiddenEarlier(src, moduleText, { moduleName = 'hidden_secrets', fileName = 'this file' } = {}) {
+    const defs = parseModule(moduleText);
+    const found = [];
+    for (const name of moduleImportNames(src, lex(src), moduleName)) {
+      if (!defs.has(name)) continue;
+      // CODES = MONTH_CODES: show the real name and its value.
+      const target = defs.get(name);
+      const real = isValidName(target) && defs.has(target) ? target : name;
+      found.push({ name, realName: real, value: defs.get(real), kind: 'moved' });
+    }
+    for (const r of renamesFor(moduleText, fileName)) found.push({ name: r.to, realName: r.from, value: '', kind: 'renamed' });
+    return found;
+  }
+
   /** First free SECRET_n name, avoiding `taken` (a Set) and names in src/module. */
   function suggestName(taken, src, moduleText) {
     const inCode = namesInCode(src || '');
@@ -1303,6 +1322,7 @@
     renameMap,
     definedIn,
     updateImporters,
+    hiddenEarlier,
     suggestName,
     variableName,
     isValidName,
