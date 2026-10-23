@@ -21,86 +21,94 @@
       </div>
     </header>
 
-    <main>
-      <div class="columns">
-        <!-- Left: original code -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>1 · Your Python file</h2>
-            <div class="panel-actions">
-              <select id="recent-select" class="recent-select" title="Reopen a file you opened before">
-                <option value="">Recent…</option>
-              </select>
-              <button id="open-btn" class="btn" title="Open a .py file from disk">Open file…</button>
-              <button id="restore-names-btn" class="btn ghost" title="Undo the renames noted in the secrets file">
-                Put names back
-              </button>
-              <button id="detect-btn" class="btn ghost" title="Scan the code for things that look like secrets">
-                Auto-detect
-              </button>
-              <button id="clear-input-btn" class="btn ghost">Clear</button>
+    <div class="workspace">
+      <!-- The project's Python files: click one to open it. -->
+      <aside id="project" class="project hidden" aria-label="Project files">
+        <div id="project-name" class="project-name"></div>
+        <nav id="project-files"></nav>
+      </aside>
+
+      <main>
+        <div class="columns">
+          <!-- Left: original code -->
+          <div class="panel">
+            <div class="panel-head">
+              <h2>1 · Your Python file</h2>
+              <div class="panel-actions">
+                <select id="recent-select" class="recent-select" title="Reopen a file you opened before">
+                  <option value="">Recent…</option>
+                </select>
+                <button id="open-btn" class="btn" title="Open a .py file from disk">Open file…</button>
+                <button id="restore-names-btn" class="btn ghost" title="Undo the renames noted in the secrets file">
+                  Put names back
+                </button>
+                <button id="detect-btn" class="btn ghost" title="Scan the code for things that look like secrets">
+                  Auto-detect
+                </button>
+                <button id="clear-input-btn" class="btn ghost">Clear</button>
+              </div>
             </div>
+            <div id="file-path" class="file-path"></div>
+            <textarea id="input" class="code" spellcheck="false"
+              placeholder="Open a .py file, or paste code here.&#10;&#10;Select a secret and press Ctrl/Cmd+E to add it."></textarea>
           </div>
-          <div id="file-path" class="file-path"></div>
-          <textarea id="input" class="code" spellcheck="false"
-            placeholder="Open a .py file, or paste code here.&#10;&#10;Select a secret and press Ctrl/Cmd+E to add it."></textarea>
+
+          <!-- Right: what the AI sees, and the private secrets file -->
+          <div class="panel">
+            <div class="panel-head">
+              <div class="mode-switch small" role="tablist" aria-label="Preview">
+                <button id="tab-file" class="mode-btn active" role="tab" aria-selected="true">3 · What the AI sees</button>
+                <button id="tab-module" class="mode-btn" role="tab" aria-selected="false">Secrets file</button>
+                <button id="tab-others" class="mode-btn hidden" role="tab" aria-selected="false">Other files</button>
+              </div>
+              <div class="panel-actions">
+                <span id="replace-count" class="count"></span>
+                <button id="copy-output-btn" class="btn ghost">Copy</button>
+                <button id="save-btn" class="btn primary" title="Write both files to disk">Save</button>
+              </div>
+            </div>
+            <div id="output-path" class="file-path"></div>
+            <textarea id="output" class="code" spellcheck="false" readonly></textarea>
+            <textarea id="module-output" class="code hidden" spellcheck="false" readonly></textarea>
+            <textarea id="others-output" class="code hidden" spellcheck="false" readonly></textarea>
+          </div>
         </div>
 
-        <!-- Right: what the AI sees, and the private secrets file -->
-        <div class="panel">
+        <!-- Secrets -->
+        <div class="panel secrets-panel">
           <div class="panel-head">
-            <div class="mode-switch small" role="tablist" aria-label="Preview">
-              <button id="tab-file" class="mode-btn active" role="tab" aria-selected="true">3 · What the AI sees</button>
-              <button id="tab-module" class="mode-btn" role="tab" aria-selected="false">Secrets file</button>
-              <button id="tab-others" class="mode-btn hidden" role="tab" aria-selected="false">Other files</button>
-            </div>
+            <h2>2 · Secrets to hide</h2>
             <div class="panel-actions">
-              <span id="replace-count" class="count"></span>
-              <button id="copy-output-btn" class="btn ghost">Copy</button>
-              <button id="save-btn" class="btn primary" title="Write both files to disk">Save</button>
+              <label class="module-name" title="The private file the secrets go into, next to your file">
+                Secrets file
+                <input id="module-name" type="text" value="hidden_secrets" spellcheck="false" />
+                <span>.py</span>
+              </label>
+              <button id="add-secret-btn" class="btn ghost">+ Add secret</button>
+              <button id="clear-secrets-btn" class="btn ghost danger">Clear all</button>
             </div>
           </div>
-          <div id="output-path" class="file-path"></div>
-          <textarea id="output" class="code" spellcheck="false" readonly></textarea>
-          <textarea id="module-output" class="code hidden" spellcheck="false" readonly></textarea>
-          <textarea id="others-output" class="code hidden" spellcheck="false" readonly></textarea>
-        </div>
-      </div>
-
-      <!-- Secrets -->
-      <div class="panel secrets-panel">
-        <div class="panel-head">
-          <h2>2 · Secrets to hide</h2>
-          <div class="panel-actions">
-            <label class="module-name" title="The private file the secrets go into, next to your file">
-              Secrets file
-              <input id="module-name" type="text" value="hidden_secrets" spellcheck="false" />
-              <span>.py</span>
-            </label>
-            <button id="add-secret-btn" class="btn ghost">+ Add secret</button>
-            <button id="clear-secrets-btn" class="btn ghost danger">Clear all</button>
+          <div class="secrets-table-wrap">
+            <div class="secrets-head-row">
+              <span class="col-secret">Secret value</span>
+              <span class="col-mode">Action</span>
+              <span class="col-ph">Name in code</span>
+              <span class="col-hits">Hidden</span>
+              <span class="col-del"></span>
+            </div>
+            <div id="secrets-list"></div>
           </div>
+          <details id="earlier" class="earlier hidden">
+            <summary>Hidden earlier (<span id="earlier-count">0</span>) — already in the secrets file</summary>
+            <div id="earlier-list"></div>
+          </details>
+          <p class="privacy-note">
+            🔒 Nothing is sent anywhere. <b>Save</b> rewrites your file to import its secrets, and puts the real values in
+            <code id="module-file-name">hidden_secrets.py</code> in the project folder. Keep that file away from AI tools and out of git.
+          </p>
         </div>
-        <div class="secrets-table-wrap">
-          <div class="secrets-head-row">
-            <span class="col-secret">Secret value</span>
-            <span class="col-mode">Action</span>
-            <span class="col-ph">Name in code</span>
-            <span class="col-hits">Hidden</span>
-            <span class="col-del"></span>
-          </div>
-          <div id="secrets-list"></div>
-        </div>
-        <details id="earlier" class="earlier hidden">
-          <summary>Hidden earlier (<span id="earlier-count">0</span>) — already in the secrets file</summary>
-          <div id="earlier-list"></div>
-        </details>
-        <p class="privacy-note">
-          🔒 Nothing is sent anywhere. <b>Save</b> rewrites your file to import its secrets, and puts the real values in
-          <code id="module-file-name">hidden_secrets.py</code> next to it. Keep that file away from AI tools and out of git.
-        </p>
-      </div>
-    </main>
+      </main>
+    </div>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 

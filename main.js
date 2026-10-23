@@ -7,6 +7,9 @@ let mainWindow = null;
 // The file the user last opened. Saving only ever writes this file, the
 // secrets module next to it, and other .py files read from its folder.
 let openedPath = null;
+// The project: the folder of the file opened with Open file… or Recent.
+// Clicking between its files keeps it; folderPaths are its other .py files.
+let projectRoot = null;
 let folderPaths = new Set();
 // Set by the renderer while it holds secrets that haven't been saved yet.
 let unsaved = false;
@@ -108,9 +111,10 @@ function buildMenu() {
 
 // ---------- file access for the renderer ----------
 
+/** The project's secrets module: one per project, in its folder. */
 function secretsPathFor(sourcePath, moduleName) {
   if (!MODULE_NAME_RE.test(moduleName)) throw new Error(`"${moduleName}" isn't a valid module name`);
-  return path.join(path.dirname(sourcePath), `${moduleName}.py`);
+  return path.join(projectRoot || path.dirname(sourcePath), `${moduleName}.py`);
 }
 
 function readText(filePath) {
@@ -161,7 +165,11 @@ function readRecent() {
 
 function rememberRecent(filePath, moduleName) {
   const list = readRecent().filter((r) => path.resolve(r.path) !== path.resolve(filePath));
-  list.unshift({ path: filePath, moduleName: MODULE_NAME_RE.test(moduleName || '') ? moduleName : 'hidden_secrets' });
+  list.unshift({
+    path: filePath,
+    root: projectRoot || path.dirname(filePath),
+    moduleName: MODULE_NAME_RE.test(moduleName || '') ? moduleName : 'hidden_secrets'
+  });
   try {
     fs.mkdirSync(path.dirname(recentFile()), { recursive: true });
     fs.writeFileSync(recentFile(), JSON.stringify(list.slice(0, MAX_RECENT), null, 2));
@@ -182,6 +190,14 @@ function registerFileHandlers() {
     });
     if (canceled || filePaths.length === 0) return null;
     openedPath = filePaths[0];
+    projectRoot = path.dirname(openedPath);
+    return { path: openedPath, ...readText(openedPath) };
+  });
+
+  // Switch to another .py file of the open project.
+  ipcMain.handle('file:open-in-project', (_event, filePath) => {
+    if (!folderPaths.has(path.resolve(filePath))) return null;
+    openedPath = filePath;
     return { path: openedPath, ...readText(openedPath) };
   });
 
@@ -194,10 +210,25 @@ function registerFileHandlers() {
 
   // Reopen a file from the recent list (only those — no arbitrary paths).
   ipcMain.handle('file:open-recent', (_event, filePath) => {
-    if (!readRecent().some((r) => path.resolve(r.path) === path.resolve(filePath))) return null;
-    if (!fs.existsSync(filePath)) return null;
+    const entry = readRecent().find((r) => path.resolve(r.path) === path.resolve(filePath));
+    if (!entry || !fs.existsSync(filePath)) return null;
     openedPath = filePath;
+    const root = entry.root && fs.existsSync(entry.root) ? entry.root : path.dirname(filePath);
+    projectRoot = path.relative(root, filePath).startsWith('..') ? path.dirname(filePath) : root;
     return { path: openedPath, ...readText(openedPath) };
+  });
+
+  // A yes/no question from the renderer, as a proper dialog.
+  ipcMain.handle('app:confirm', async (_event, { message, detail, ok }) => {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: 'question',
+      buttons: [String(ok || 'OK'), 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      message: String(message),
+      detail: String(detail || '')
+    });
+    return response === 0;
   });
 
   ipcMain.handle('app:set-unsaved', (_event, value) => {
@@ -207,10 +238,11 @@ function registerFileHandlers() {
   // The other Python files in the opened file's folder (and below), so files
   // that import from it can be kept working when its names change.
   ipcMain.handle('file:read-folder', (_event, sourcePath) => {
-    if (sourcePath !== openedPath) return [];
+    if (sourcePath !== openedPath) return { root: null, files: [] };
     folderPaths = new Set();
     const files = [];
-    for (const file of pythonFilesUnder(path.dirname(sourcePath))) {
+    const root = projectRoot || path.dirname(sourcePath);
+    for (const file of pythonFilesUnder(root)) {
       if (path.resolve(file) === path.resolve(sourcePath)) continue;
       try {
         if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
@@ -220,7 +252,7 @@ function registerFileHandlers() {
         // Unreadable files are simply left out.
       }
     }
-    return files;
+    return { root, files };
   });
 
   ipcMain.handle('file:read-secrets', (_event, sourcePath, moduleName) => {
@@ -244,7 +276,7 @@ function registerFileHandlers() {
       }
       const othersList = others.length
         ? `\n\nand updates ${others.length} other ${others.length === 1 ? 'file that imports' : 'files that import'} from it:\n` +
-          others.map((o) => `  ${path.relative(path.dirname(sourcePath), o.path)}`).join('\n')
+          others.map((o) => `  ${path.relative(projectRoot || path.dirname(sourcePath), o.path)}`).join('\n')
         : '';
       const { response } = await dialog.showMessageBox(mainWindow, {
         type: 'question',

@@ -112,10 +112,109 @@ body {
 }
 
 /* ---------- Layout ---------- */
+.workspace {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
 main {
   flex: 1;
+  min-width: 0;
   overflow: auto;
   padding: 18px 20px 20px;
+}
+
+/* ---------- Project sidebar ---------- */
+.project {
+  width: 220px;
+  flex-shrink: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: #12141c;
+  padding: 12px 8px;
+}
+
+.project.hidden {
+  display: none;
+}
+
+.project-name {
+  padding: 2px 8px 10px;
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-folder {
+  padding: 8px 8px 3px;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.project-file.nested {
+  padding-left: 18px;
+}
+
+.project-file:hover {
+  background: #1d2230;
+  color: var(--text);
+}
+
+.project-file.active {
+  background: #1f2a44;
+  color: var(--text);
+}
+
+.project-file .file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-file .mark {
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.project-file .mark.uses {
+  color: var(--good);
+}
+
+.project-file .mark.updates {
+  color: #e8b44c;
+}
+
+@media (max-width: 860px) {
+  .project {
+    width: 170px;
+  }
 }
 
 textarea.code.hidden,
@@ -159,6 +258,7 @@ textarea.code.hidden,
 .panel-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
