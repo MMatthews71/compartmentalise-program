@@ -301,3 +301,91 @@ test('rename only on a name from the secrets module keeps the import working', (
   assert.strictEqual(out.code, 'from hidden_secrets import CONTRACT_KEY\nx = {"k": 1}[CONTRACT_KEY]\n');
   assert.strictEqual(out.moduleText, 'contract = "k"\n\nCONTRACT_KEY = contract\n');
 });
+
+test('files that import a renamed name are updated too, and put back', (t) => {
+  const { renameMap, definedIn, updateImporters } = require('../pyextract.js');
+  const files = {
+    'pipeline.py': [
+      'MONTH_CODES = {"JAN": "F", "MAY": "K"}',
+      'YEAR = 6',
+      'def resolve_ioe(m):',
+      '    return "X" + MONTH_CODES[m] + str(YEAR)',
+      ''
+    ].join('\n'),
+    'plain.py': 'from pipeline import MONTH_CODES, resolve_ioe\n# MONTH_CODES drives resolve_ioe\nr = (sorted(MONTH_CODES), resolve_ioe("MAY"))\n',
+    'aliased.py': 'from pipeline import MONTH_CODES as MC\nr = MC["JAN"]\n',
+    'module.py': 'import pipeline as p\nr = (p.MONTH_CODES["MAY"], p.resolve_ioe("JAN"), p.YEAR)\n',
+    'star.py': 'from pipeline import *\nr = len(MONTH_CODES)\n',
+    'multi.py': 'from pipeline import (\n    MONTH_CODES,\n    YEAR,\n)\nr = (MONTH_CODES["JAN"], YEAR)\n',
+    'clash.py': 'from pipeline import MONTH_CODES\nCODES = 5\nr = (MONTH_CODES["JAN"], CODES)\n'
+  };
+  const others = Object.keys(files).filter((f) => f !== 'pipeline.py');
+  const run = (set) => {
+    if (!python) return null;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'importers-'));
+    for (const [name, text] of Object.entries(set)) fs.writeFileSync(path.join(dir, name), text);
+    const script = `import sys, json\nsys.path.insert(0, ${JSON.stringify(dir)})\nimport importlib\nprint(json.dumps({m: repr(importlib.import_module(m).r) for m in ${JSON.stringify(others.map((f) => f.slice(0, -3)))}}))`;
+    const out = JSON.parse(execFileSync(python, ['-c', script], { encoding: 'utf8', cwd: dir }));
+    fs.rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+  const before = run(files);
+
+  const secrets = [
+    { id: 1, value: 'MONTH_CODES', name: 'CODES', mode: 'move' },
+    { id: 2, value: 'resolve_ioe', name: 'resolve_contract', mode: 'rename' }
+  ];
+  const out = extract(files['pipeline.py'], secrets, { fileName: 'pipeline.py' });
+  const updated = updateImporters(
+    others.map((p) => ({ path: p, text: files[p] })),
+    'pipeline',
+    renameMap(out.renamed, out.moduleText, 'pipeline.py'),
+    definedIn(out.code)
+  );
+  const after = { 'pipeline.py': out.code, 'hidden_secrets.py': out.moduleText };
+  for (const u of updated) after[u.path] = u.code;
+  for (const p of others) assert.ok(after[p] !== undefined, `${p} was found as an importer`);
+
+  assert.strictEqual(after['plain.py'], 'from pipeline import CODES, resolve_contract\n# CODES drives resolve_contract\nr = (sorted(CODES), resolve_contract("MAY"))\n');
+  assert.strictEqual(after['aliased.py'], 'from pipeline import CODES as MC\nr = MC["JAN"]\n');
+  assert.strictEqual(after['module.py'], 'import pipeline as p\nr = (p.CODES["MAY"], p.resolve_contract("JAN"), p.YEAR)\n');
+  assert.strictEqual(after['star.py'], 'from pipeline import *\nr = len(CODES)\n');
+  assert.match(after['multi.py'], /^ {4}CODES,$/m);
+  assert.strictEqual(after['clash.py'], 'from pipeline import CODES as MONTH_CODES\nCODES = 5\nr = (MONTH_CODES["JAN"], CODES)\n');
+  assert.match(updated.find((u) => u.path === 'clash.py').problems[0], /stays visible/);
+  if (python) assert.deepStrictEqual(run(after), before);
+
+  // Put names back: pipeline's rename-only names come back, and so do the importers'.
+  const back = restoreNames(after['pipeline.py'], after['hidden_secrets.py'], { fileName: 'pipeline.py' });
+  assert.deepStrictEqual(back.restored, [{ from: 'resolve_ioe', to: 'resolve_contract' }]);
+  const reverse = new Map(back.restored.map((r) => [r.to, r.from]));
+  const restored = { 'pipeline.py': back.code, 'hidden_secrets.py': back.moduleText };
+  for (const u of updateImporters(others.map((p) => ({ path: p, text: after[p] })), 'pipeline', reverse, definedIn(back.code))) {
+    restored[u.path] = u.code;
+  }
+  assert.match(restored['plain.py'], /^from pipeline import CODES, resolve_ioe$/m);
+  assert.match(restored['module.py'], /p\.resolve_ioe\("JAN"\)/);
+  if (python) assert.deepStrictEqual(run(restored), before);
+});
+
+test('an import broken by an earlier save is repaired from the secrets file', () => {
+  const { renameMap, definedIn, updateImporters } = require('../pyextract.js');
+  // pipeline.py was saved earlier: MONTH_CODES moved out and renamed CODES.
+  const pipeline = 'from hidden_secrets import CODES\nx = CODES["JAN"]\n';
+  const moduleText = 'MONTH_CODES = {"JAN": "F"}\nCODES = MONTH_CODES\n';
+  const [fixed] = updateImporters(
+    [{ path: 'report.py', text: 'from pipeline import MONTH_CODES\nprint(MONTH_CODES)\n' }],
+    'pipeline',
+    renameMap([], moduleText, 'pipeline.py'),
+    definedIn(pipeline)
+  );
+  assert.strictEqual(fixed.code, 'from pipeline import CODES\nprint(CODES)\n');
+  // Something it can't work out is reported, not guessed.
+  const [stuck] = updateImporters(
+    [{ path: 'report.py', text: 'from pipeline import GONE\n' }],
+    'pipeline',
+    new Map(),
+    definedIn(pipeline)
+  );
+  assert.match(stuck.problems[0], /doesn't have it any more/);
+});

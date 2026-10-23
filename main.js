@@ -4,9 +4,10 @@ const path = require('path');
 
 // Keep a global reference so the window isn't garbage-collected.
 let mainWindow = null;
-// The file the user last opened. Saving only ever writes this file and the
-// secrets module next to it.
+// The file the user last opened. Saving only ever writes this file, the
+// secrets module next to it, and other .py files read from its folder.
 let openedPath = null;
+let folderPaths = new Set();
 
 const MODULE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -100,6 +101,31 @@ function readText(filePath) {
   return { text: text.replace(/\r\n/g, '\n'), eol: text.includes('\r\n') ? '\r\n' : '\n' };
 }
 
+// Folders that never hold the user's own code.
+const SKIP_DIRS = new Set(['__pycache__', 'node_modules', 'venv', 'env', 'site-packages', 'dist', 'build']);
+const MAX_FOLDER_FILES = 2000;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** Every .py file under `dir`, skipping hidden, virtualenv and build folders. */
+function pythonFilesUnder(dir, found = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return found;
+  }
+  for (const entry of entries) {
+    if (found.length >= MAX_FOLDER_FILES) break;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name)) pythonFilesUnder(full, found);
+    } else if (entry.isFile() && /\.pyw?$/.test(entry.name)) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
 function registerFileHandlers() {
   ipcMain.handle('file:open', async () => {
     const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
@@ -115,19 +141,48 @@ function registerFileHandlers() {
     return { path: openedPath, ...readText(openedPath) };
   });
 
+  // The other Python files in the opened file's folder (and below), so files
+  // that import from it can be kept working when its names change.
+  ipcMain.handle('file:read-folder', (_event, sourcePath) => {
+    if (sourcePath !== openedPath) return [];
+    folderPaths = new Set();
+    const files = [];
+    for (const file of pythonFilesUnder(path.dirname(sourcePath))) {
+      if (path.resolve(file) === path.resolve(sourcePath)) continue;
+      try {
+        if (fs.statSync(file).size > MAX_FILE_BYTES) continue;
+        files.push({ path: file, ...readText(file) });
+        folderPaths.add(path.resolve(file));
+      } catch {
+        // Unreadable files are simply left out.
+      }
+    }
+    return files;
+  });
+
   ipcMain.handle('file:read-secrets', (_event, sourcePath, moduleName) => {
     if (sourcePath !== openedPath) return null;
     const secretsPath = secretsPathFor(sourcePath, moduleName);
     return fs.existsSync(secretsPath) ? readText(secretsPath).text : null;
   });
 
-  ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol, restoring }) => {
+  ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol, restoring, others = [] }) => {
     try {
       if (!openedPath || sourcePath !== openedPath) throw new Error('Open the file again before saving');
       const secretsPath = secretsPathFor(sourcePath, moduleName);
       if (path.resolve(secretsPath) === path.resolve(sourcePath)) {
         throw new Error('The secrets file must be a different file from the one you opened');
       }
+      for (const other of others) {
+        const resolved = path.resolve(other.path);
+        if (!folderPaths.has(resolved) || resolved === path.resolve(secretsPath)) {
+          throw new Error(`Won't write ${other.path}: it wasn't read from this folder`);
+        }
+      }
+      const othersList = others.length
+        ? `\n\nand updates ${others.length} other ${others.length === 1 ? 'file that imports' : 'files that import'} from it:\n` +
+          others.map((o) => `  ${path.relative(path.dirname(sourcePath), o.path)}`).join('\n')
+        : '';
       const { response } = await dialog.showMessageBox(mainWindow, {
         type: 'question',
         buttons: ['Save', 'Cancel'],
@@ -135,16 +190,18 @@ function registerFileHandlers() {
         cancelId: 1,
         title: 'Save changes',
         message: restoring ? 'Put the real names back and save?' : 'Hide the secrets and save?',
-        detail: restoring
-          ? `This overwrites:\n  ${sourcePath}\n     (renamed names changed back)\n\n` +
-            `and updates:\n  ${secretsPath}\n     (the notes about those renames are removed)`
-          : `This overwrites:\n  ${sourcePath}\n     (secrets removed or renamed, imports added)\n\n` +
-            `and writes:\n  ${secretsPath}\n     (keep this one away from AI tools)`
+        detail:
+          (restoring
+            ? `This overwrites:\n  ${sourcePath}\n     (renamed names changed back)\n\n` +
+              `and updates:\n  ${secretsPath}\n     (the notes about those renames are removed)`
+            : `This overwrites:\n  ${sourcePath}\n     (secrets removed or renamed, imports added)\n\n` +
+              `and writes:\n  ${secretsPath}\n     (keep this one away from AI tools)`) + othersList
       });
       if (response !== 0) return { canceled: true };
-      const toDisk = (text) => (eol === '\r\n' ? text.replace(/\n/g, '\r\n') : text);
+      const toDisk = (text, ending = eol) => (ending === '\r\n' ? text.replace(/\n/g, '\r\n') : text);
       // Secrets first, so a failure writing the source never loses them.
       fs.writeFileSync(secretsPath, toDisk(secretsText), 'utf8');
+      for (const other of others) fs.writeFileSync(other.path, toDisk(other.text, other.eol), 'utf8');
       fs.writeFileSync(sourcePath, toDisk(sourceText), 'utf8');
       return { ok: true, secretsPath };
     } catch (err) {

@@ -11,7 +11,17 @@
 
 const IS_MAC = navigator.platform.toUpperCase().includes('MAC');
 const MOD_KEY = IS_MAC ? 'Cmd' : 'Ctrl';
-const { extract, restoreNames, renamesFor, suggestName, variableName, isValidName } = window.PyExtract;
+const {
+  extract,
+  restoreNames,
+  renamesFor,
+  renameMap,
+  definedIn,
+  updateImporters,
+  suggestName,
+  variableName,
+  isValidName
+} = window.PyExtract;
 // Only there when running inside the desktop app.
 const fileBridge = window.files || null;
 
@@ -22,7 +32,11 @@ let nextId = 1;
 let openFile = null;
 /** Current contents of the secrets module next to that file ('' if none). */
 let existingModule = '';
+/** The other .py files in that file's folder: [{ path, text, eol }]. */
+let folderFiles = [];
 let lastResult = null;
+/** Files that import from the open file and change with it: [{ path, code, changes, problems }]. */
+let lastOthers = [];
 
 // ---------- element handles ----------
 const el = (id) => document.getElementById(id);
@@ -30,6 +44,7 @@ const el = (id) => document.getElementById(id);
 const input = el('input');
 const output = el('output');
 const moduleOutput = el('module-output');
+const othersOutput = el('others-output');
 const secretsList = el('secrets-list');
 const replaceCount = el('replace-count');
 const moduleNameInput = el('module-name');
@@ -70,6 +85,46 @@ function moduleName() {
 /** The open file's name, as rename notes in the secrets file record it. */
 function fileName() {
   return openFile ? openFile.path.split(/[\\/]/).pop() : 'this file';
+}
+
+/** The folder files that import from the open file, as they'd be after `map`
+ *  (old name -> new name) is applied to it, given its new `code`. Only the
+ *  ones that change or have something to report. */
+function importersAfter(code, map) {
+  if (!openFile || map.size === 0) return [];
+  const stem = fileName().replace(/\.pyw?$/, '');
+  const candidates = folderFiles.filter((f) => f.path.split(/[\\/]/).pop() !== `${moduleName()}.py`);
+  const before = new Map(candidates.map((f) => [f.path, f.text]));
+  return updateImporters(candidates, stem, map, definedIn(code)).filter(
+    (o) => o.code !== before.get(o.path) || o.problems.length
+  );
+}
+
+/** The changed importers, ready to hand to the save bridge. */
+function othersToSave(others) {
+  const eolOf = new Map(folderFiles.map((f) => [f.path, f.eol]));
+  return others.filter((o) => o.changes).map((o) => ({ path: o.path, text: o.code, eol: eolOf.get(o.path) }));
+}
+
+/** After a save, remember the new contents of the other files. */
+function rememberSaved(saved) {
+  const text = new Map(saved.map((o) => [o.path, o.text]));
+  folderFiles = folderFiles.map((f) => (text.has(f.path) ? { ...f, text: text.get(f.path) } : f));
+}
+
+/** Show the other files that change, each under a header with its path. */
+function showOthers() {
+  const tab = el('tab-others');
+  tab.classList.toggle('hidden', lastOthers.length === 0);
+  tab.textContent = `Other files (${lastOthers.length})`;
+  if (lastOthers.length === 0 && tab.classList.contains('active')) showPreview('file');
+  othersOutput.value = lastOthers
+    .map((o) => {
+      const head = `# ===== ${o.path.split(/[\\/]/).pop()} — ${o.changes} ${o.changes === 1 ? 'change' : 'changes'} =====`;
+      const notes = o.problems.map((p) => `# ⚠ ${p}`);
+      return [head, ...notes, o.code].join('\n');
+    })
+    .join('\n\n');
 }
 
 // ---------- secrets model ----------
@@ -208,6 +263,9 @@ function update() {
   el('module-file-name').textContent = `${name || '?'}.py`;
 
   lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule, fileName: fileName() });
+  // Files that import from this one must follow its renames, or they'd break.
+  lastOthers = nameOk ? importersAfter(lastResult.code, renameMap(lastResult.renamed, lastResult.moduleText, fileName())) : [];
+  showOthers();
   output.value = lastResult.code;
   moduleOutput.value = lastResult.moduleText;
   updateRows(lastResult.results);
@@ -227,11 +285,20 @@ function update() {
     replaceCount.textContent = 'no matches found';
     replaceCount.style.color = 'var(--text-faint)';
   } else {
-    replaceCount.textContent = `${moved} hidden` + (visible ? ` · ${visible} left visible` : '');
+    const others = lastOthers.filter((o) => o.changes).length;
+    replaceCount.textContent =
+      `${moved} hidden` +
+      (others ? ` · ${others} other ${others === 1 ? 'file' : 'files'} updated` : '') +
+      (visible ? ` · ${visible} left visible` : '');
     replaceCount.style.color = visible ? 'var(--danger)' : 'var(--good)';
   }
 
   el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
+  if (nameOk && secrets.length === 0 && lastOthers.some((o) => o.changes)) {
+    // Nothing new to hide, but files broken by an earlier save can be fixed.
+    replaceCount.textContent = `${lastOthers.filter((o) => o.changes).length} other file(s) need updating — Save fixes them`;
+    replaceCount.style.color = 'var(--danger)';
+  }
   el('restore-names-btn').disabled =
     !fileBridge || !openFile || !nameOk || renamesFor(existingModule, fileName()).length === 0;
 }
@@ -246,7 +313,13 @@ function showPaths() {
   const ltr = (text) => (text ? `\u200e${text}\u200e` : '');
   el('file-path').textContent = openFile ? ltr(openFile.path) : fileBridge ? 'No file open — paste code or open one' : '';
   el('output-path').textContent = openFile
-    ? ltr(el('tab-module').classList.contains('active') ? `${dir}${sep}${moduleName()}.py` : openFile.path)
+    ? ltr(
+        el('tab-module').classList.contains('active')
+          ? `${dir}${sep}${moduleName()}.py`
+          : el('tab-others').classList.contains('active')
+            ? `${dir}${sep}…`
+            : openFile.path
+      )
     : '';
 }
 
@@ -261,6 +334,7 @@ async function openFromDisk() {
   openFile = { path: opened.path, eol: opened.eol };
   input.value = opened.text;
   await loadModule();
+  folderFiles = (await fileBridge.readFolder(openFile.path)) || [];
   showPaths();
   update();
   showToast(existingModule ? `Opened — found ${moduleName()}.py next to it` : 'Opened');
@@ -268,7 +342,8 @@ async function openFromDisk() {
 
 async function save() {
   if (!fileBridge || !openFile || !lastResult) return;
-  if (lastResult.code === input.value && lastResult.added === 0) {
+  const others = othersToSave(lastOthers);
+  if (lastResult.code === input.value && lastResult.added === 0 && others.length === 0) {
     showToast('Nothing to save — add some secrets first');
     return;
   }
@@ -277,7 +352,8 @@ async function save() {
     sourceText: lastResult.code,
     moduleName: moduleName(),
     secretsText: lastResult.moduleText,
-    eol: openFile.eol
+    eol: openFile.eol,
+    others
   });
   if (result.canceled) return;
   if (result.error) {
@@ -288,6 +364,7 @@ async function save() {
   // The file on disk is now the safe version; carry on from there.
   input.value = lastResult.code;
   existingModule = lastResult.moduleText;
+  rememberSaved(others);
   secrets = [];
   renderSecrets();
   update();
@@ -299,13 +376,16 @@ async function putNamesBack() {
   if (!fileBridge || !openFile) return;
   const result = restoreNames(input.value, existingModule, { moduleName: moduleName(), fileName: fileName() });
   const stuck = result.renames.filter((r) => result.results.get(r.id).problems.length);
+  // Files that import the renamed names go back too.
+  const others = othersToSave(importersAfter(result.code, new Map(result.restored.map((r) => [r.to, r.from]))));
   const saved = await fileBridge.save({
     sourcePath: openFile.path,
     sourceText: result.code,
     moduleName: moduleName(),
     secretsText: result.moduleText,
     eol: openFile.eol,
-    restoring: true
+    restoring: true,
+    others
   });
   if (saved.canceled) return;
   if (saved.error) {
@@ -314,6 +394,7 @@ async function putNamesBack() {
   }
   input.value = result.code;
   existingModule = result.moduleText;
+  rememberSaved(others);
   update();
   showToast(
     stuck.length
@@ -406,13 +487,16 @@ function hideSelection() {
 // ---------- preview tabs ----------
 
 function showPreview(which) {
-  const fileActive = which === 'file';
-  output.classList.toggle('hidden', !fileActive);
-  moduleOutput.classList.toggle('hidden', fileActive);
-  el('tab-file').classList.toggle('active', fileActive);
-  el('tab-module').classList.toggle('active', !fileActive);
-  el('tab-file').setAttribute('aria-selected', String(fileActive));
-  el('tab-module').setAttribute('aria-selected', String(!fileActive));
+  for (const [name, box] of [
+    ['file', output],
+    ['module', moduleOutput],
+    ['others', othersOutput]
+  ]) {
+    const active = name === which;
+    box.classList.toggle('hidden', !active);
+    el(`tab-${name}`).classList.toggle('active', active);
+    el(`tab-${name}`).setAttribute('aria-selected', String(active));
+  }
   showPaths();
 }
 
@@ -432,18 +516,20 @@ function init() {
     input.value = '';
     openFile = null;
     existingModule = '';
+    folderFiles = [];
     showPaths();
     update();
   });
 
-  el('copy-output-btn').addEventListener('click', () =>
-    el('tab-module').classList.contains('active')
-      ? copyText(moduleOutput.value, 'Secrets file')
-      : copyText(output.value, 'Safe code')
-  );
+  el('copy-output-btn').addEventListener('click', () => {
+    if (el('tab-module').classList.contains('active')) copyText(moduleOutput.value, 'Secrets file');
+    else if (el('tab-others').classList.contains('active')) copyText(othersOutput.value, 'Other files');
+    else copyText(output.value, 'Safe code');
+  });
 
   el('tab-file').addEventListener('click', () => showPreview('file'));
   el('tab-module').addEventListener('click', () => showPreview('module'));
+  el('tab-others').addEventListener('click', () => showPreview('others'));
 
   moduleNameInput.addEventListener('input', async () => {
     await loadModule();
