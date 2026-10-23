@@ -49,6 +49,7 @@
             <div class="mode-switch small" role="tablist" aria-label="Preview">
               <button id="tab-file" class="mode-btn active" role="tab" aria-selected="true">3 · What the AI sees</button>
               <button id="tab-module" class="mode-btn" role="tab" aria-selected="false">Secrets file</button>
+              <button id="tab-others" class="mode-btn hidden" role="tab" aria-selected="false">Other files</button>
             </div>
             <div class="panel-actions">
               <span id="replace-count" class="count"></span>
@@ -59,6 +60,7 @@
           <div id="output-path" class="file-path"></div>
           <textarea id="output" class="code" spellcheck="false" readonly></textarea>
           <textarea id="module-output" class="code hidden" spellcheck="false" readonly></textarea>
+          <textarea id="others-output" class="code hidden" spellcheck="false" readonly></textarea>
         </div>
       </div>
 

@@ -494,7 +494,12 @@
       const trailing = /[ \t]*$/.exec(m[0])[0];
       return src.slice(0, m.index) + formatImport(moduleName, merged) + trailing + src.slice(m.index + m[0].length);
     }
-    const pos = importPosition(src);
+    let pos = importPosition(src);
+    if (!src.slice(0, pos).trim()) {
+      // Only blank lines above (say, a moved first line): start at the top.
+      src = src.slice(pos);
+      pos = 0;
+    }
     const lead = pos > 0 && src[pos - 1] !== '\n' ? '\n' : '';
     const gap = pos < src.length ? '\n' : '';
     return src.slice(0, pos) + lead + formatImport(moduleName, names) + '\n' + gap + src.slice(pos);
@@ -646,6 +651,7 @@
       `\\bfor[ \\t]+[\\w \\t,()]*\\b${name}\\b[\\w \\t,()]*\\bin\\b`,
       `\\bas\\s+${name}\\b`,
       `\\bimport\\s+[^\\n]*\\b${name}\\b`,
+      `\\bimport\\s*\\([^)]*\\b${name}\\b`, // from x import (\n    name,\n)
       `\\b(?:def\\s+\\w+\\s*\\(|lambda\\b)[^:]*?\\b${name}\\b`,
       `\\b${name}\\s*:=`,
       `\\bglobal\\s+[^\\n]*\\b${name}\\b`
@@ -698,11 +704,12 @@
         sites.problem = `${name} is printed by an f-string {…=} on line ${lineOf(at)}, so it can't be renamed`;
         return sites;
       }
-      const lineStart = src.lastIndexOf('\n', at - 1) + 1;
-      const nl = src.indexOf('\n', at);
-      const fromElsewhere = /^\s*(?:from\s+(\S+)\s+)?import\b/.exec(src.slice(lineStart, nl === -1 ? src.length : nl));
+      // The whole statement, so an entry on its own line inside
+      // `from x import (\n    NAME,\n)` still counts as imported.
+      const st = stmts.find((x) => x.s <= at && at < x.e) || { s: at, e: at };
+      const fromElsewhere = /^\s*(?:from\s+(\S+)\s+)?import\b/.exec(src.slice(st.s, st.e));
       if (fromElsewhere && fromElsewhere[1] !== moduleName) {
-        sites.problem = `${name} is imported on line ${lineOf(at)}, so it can't be renamed`;
+        sites.problem = `${name} is imported on line ${lineOf(at)} — rename it in the file it comes from (files that import it get updated too)`;
         return sites;
       }
       const prev = src.slice(0, at).replace(/\s+$/, '').slice(-1);
@@ -745,6 +752,7 @@
     const imported = new Set();
     const taken = new Map(moduleDefs); // name -> value key, for this run
     const newDefs = []; // { name, text, pos, needs: [import lines] }
+    const renamed = []; // { from, to }: names this file no longer uses
     const lineOf = (pos) => src.slice(0, pos).split('\n').length;
     const overlaps = (s, e) => consumed.some(([a, b]) => s < b && e > a);
 
@@ -877,6 +885,7 @@
       for (const x of v.visible) v.result.problems.push({ line: lineOf(x.at), reason: x.reason });
       if (v.alias === v.name) continue;
       allocate(v.alias, v.name, () => `${v.alias} = ${v.name}`, true, (v.a ? v.a.s : 0) + 0.5);
+      renamed.push({ from: v.name, to: v.alias });
       for (const at of v.renames) {
         if (overlaps(at, at + v.name.length)) continue; // inside a moved definition
         edits.push({ s: at, e: at + v.name.length, text: v.alias });
@@ -894,7 +903,8 @@
       results.set(secret.id, result);
       const from = secret.value.trim();
       const to = secret.name.trim();
-      const fail = (reason) => result.problems.push({ line: 0, reason });
+      const first = isValidName(from) ? src.search(new RegExp(`(?<![\\w])${from}(?![\\w])`)) : -1;
+      const fail = (reason) => result.problems.push({ line: lineOf(Math.max(first, 0)), reason });
       if (!isValidName(from)) fail('Rename only works on a name, like MONTH_CODES');
       else if (!isValidName(to)) fail(to ? `"${to}" isn't a valid Python name` : 'needs a new name');
       else if (to === from) fail('give it a different name to rename it to');
@@ -927,7 +937,10 @@
         // Renaming text inside a string would change what the program does.
         result.problems.push({ line: lineOf(x.at), reason: `${from} is inside a string, so it stays` });
       }
-      if (result.hidden) records.push(`${from} -> ${to}`);
+      if (result.hidden) {
+        records.push(`${from} -> ${to}`);
+        renamed.push({ from, to });
+      }
     }
 
     const ordered = others.sort((a, b) => b.value.trim().length - a.value.trim().length);
@@ -1135,7 +1148,7 @@
       moduleText += '\n' + lines.join('\n') + '\n';
     }
 
-    return { code, moduleText, results, added: newDefs.length + notes.length };
+    return { code, moduleText, results, added: newDefs.length + notes.length, renamed };
   }
 
   const RENAME_NOTE = /^# Renamed in (.+): ([A-Za-z_]\w*) -> ([A-Za-z_]\w*)\n?/gm;
@@ -1154,10 +1167,113 @@
     const out = extract(src, back, { moduleName, existingModule: moduleText, fileName, record: false });
     // Drop the notes for names that went back (or no longer appear at all).
     const done = new Set(back.filter((b) => !out.results.get(b.id).problems.length).map((b) => `${b.name} -> ${b.value}`));
-    const cleaned = out.moduleText.replace(RENAME_NOTE, (line, file, from, to) =>
-      file === fileName && done.has(`${from} -> ${to}`) ? '' : line
-    );
-    return { code: out.code, moduleText: cleaned, results: out.results, renames: back };
+    const cleaned = out.moduleText
+      .replace(RENAME_NOTE, (line, file, from, to) => (file === fileName && done.has(`${from} -> ${to}`) ? '' : line))
+      .replace(/\n{3,}/g, '\n\n');
+    const restored = back.filter((b) => done.has(`${b.name} -> ${b.value}`)).map((b) => ({ from: b.name, to: b.value }));
+    return { code: out.code, moduleText: cleaned, results: out.results, renames: back, restored };
+  }
+
+  // ---------- other files that import this one ----------
+
+  /** Old name -> new name for everything a file has renamed: this run's
+   *  renames, its earlier rename notes, and `NEW = OLD` lines in the module. */
+  function renameMap(renamed, moduleText, fileName) {
+    const map = new Map();
+    for (const m of (moduleText || '').matchAll(/^([A-Za-z_]\w*) = ([A-Za-z_]\w*)[ \t]*$/gm)) map.set(m[2], m[1]);
+    for (const r of renamesFor(moduleText, fileName)) map.set(r.from, r.to);
+    for (const r of renamed) map.set(r.from, r.to);
+    return map;
+  }
+
+  /** A test for which names `code` defines (or imports), for checking what
+   *  another file can still import from it. */
+  function definedIn(code) {
+    const tokens = lex(code);
+    return (name) => bindsName(code, tokens, name);
+  }
+
+  /**
+   * Update the files that import from module `stem` after its names
+   * changed: for each name they import that `stillThere(name)` says is gone,
+   * and `map` says what it became, the import and every use in that file
+   * switch to the new name. `files` is [{ path, text }].
+   *
+   * Returns [{ path, code, changes, problems: [string] }] for every file
+   * that imports from `stem`.
+   */
+  function updateImporters(files, stem, map, stillThere) {
+    const out = [];
+    const ofStem = (mod) => mod.replace(/^\.+/, '').split('.').pop() === stem;
+    for (const file of files) {
+      if (!file.text.includes(stem)) continue;
+      const src = file.text;
+      const tokens = lex(src);
+      const docstrings = statementStrings(src, tokens);
+      const used = namesInCode(src);
+      const edits = new Map(); // position -> { e, text }
+      const problems = [];
+      let imports = false;
+      const gone = (name) => !stillThere(name);
+      const rename = (from, to, mod) => {
+        const sites = nameSites(src, tokens, docstrings, from, mod, definesMember(src, from));
+        if (sites.problem) return problems.push(`${from}: ${sites.problem}`);
+        for (const at of sites.code.concat(sites.text.filter((x) => x.kind !== 'string').map((x) => x.at))) {
+          edits.set(at, { e: at + from.length, text: to });
+        }
+      };
+      for (const st of statements(src, tokens)) {
+        const text = src.slice(st.s, st.e);
+        let m;
+        if ((m = /^\s*from\s+(\S+)\s+import\s+([\s\S]+)$/.exec(text)) && ofStem(m[1])) {
+          imports = true;
+          const list = m[2].replace(/#[^\n]*/g, '');
+          if (/^\s*\(?\s*\*/.test(list)) {
+            // import *: rename uses of gone names this file doesn't define itself.
+            for (const [from, to] of map) {
+              if (gone(from) && used.has(from) && !bindsName(src, tokens, from)) rename(from, to, m[1]);
+            }
+            continue;
+          }
+          for (const entry of list.replace(/[()\\]/g, ' ').split(',')) {
+            const p = /^\s*([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(entry);
+            if (!p || !gone(p[1])) continue;
+            const to = map.get(p[1]);
+            if (!to) {
+              problems.push(`imports ${p[1]} from ${m[1]}, which doesn't have it any more`);
+              continue;
+            }
+            const at = st.s + text.search(new RegExp(`(?<![\\w.])${p[1]}(?!\\w)(?=\\s*(?:as\\b|,|\\)|$|#|\\\\))`));
+            if (p[2] || used.has(to)) {
+              // `X as Y`, or the new name is taken here: just import it under the old one.
+              edits.set(at, { e: at + p[1].length, text: p[2] ? to : `${to} as ${p[1]}` });
+              if (!p[2]) problems.push(`${p[1]} stays visible here — this file already uses ${to}`);
+            } else rename(p[1], to, m[1]);
+          }
+        } else if ((m = /^\s*import\s+([\s\S]+)$/.exec(text))) {
+          for (const entry of m[1].split(',')) {
+            const p = /^\s*([\w.]+)(?:\s+as\s+([A-Za-z_]\w*))?\s*$/.exec(entry);
+            if (!p || !ofStem(p[1])) continue;
+            imports = true;
+            // module.NAME uses: switch the NAME part.
+            const receiver = escapeRegExp(p[2] || p[1]).replace(/\\\./g, '\\s*\\.\\s*');
+            for (const [from, to] of map) {
+              if (!gone(from)) continue;
+              for (const u of src.matchAll(new RegExp(`(?<![\\w.])${receiver}\\s*\\.\\s*(${from})(?!\\w)`, 'g'))) {
+                if (locate(tokens, u.index).k !== -1) continue;
+                const at = u.index + u[0].length - from.length;
+                edits.set(at, { e: at + from.length, text: to });
+              }
+            }
+          }
+        }
+      }
+      if (!imports) continue;
+      let code = src;
+      for (const [s, ed] of [...edits].sort((a, b) => b[0] - a[0])) code = code.slice(0, s) + ed.text + code.slice(ed.e);
+      out.push({ path: file.path, code, changes: edits.size, problems });
+    }
+    return out;
   }
 
   /** First free SECRET_n name, avoiding `taken` (a Set) and names in src/module. */
@@ -1180,7 +1296,20 @@
     return topLevelAssignments(src, topLevel(src, lex(src))).some((a) => a.name === v) ? v : '';
   }
 
-  const api = { extract, restoreNames, renamesFor, suggestName, variableName, isValidName, lex, locate, parseModule };
+  const api = {
+    extract,
+    restoreNames,
+    renamesFor,
+    renameMap,
+    definedIn,
+    updateImporters,
+    suggestName,
+    variableName,
+    isValidName,
+    lex,
+    locate,
+    parseModule
+  };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.PyExtract = api;
 })(typeof window !== 'undefined' ? window : globalThis);

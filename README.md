@@ -74,6 +74,30 @@ changing it would change what the program does. It refuses names your file
 doesn't define (built-ins like `len`, or imported names), and names that would
 clash with something already in the file.
 
+### Other files that import this one
+
+When you open a file, the app also reads the other `.py` files in its folder
+(and subfolders — skipping `.git`, virtual environments, `__pycache__` and the
+like). If you rename something that another file imports —
+`from pipeline import MONTH_CODES`, `import pipeline as p` … `p.MONTH_CODES`,
+`from pipeline import (…)` over several lines, or `from pipeline import *` —
+that file is updated too: its import and every use switch to the new name, so
+nothing breaks and the old name doesn't linger there either. They're shown
+under **Other files** before you save, and **Put names back** changes them
+back as well.
+
+This also fixes files broken by an earlier save: if another file still
+imports a name the secrets file shows was renamed, opening the file it comes
+from offers to update it.
+
+If another file already uses the new name for something else, it imports the
+renamed one under its old name instead (`from pipeline import CODES as
+MONTH_CODES`) and tells you, so it keeps working.
+
+Renaming a name that *this* file imports from another of your files is
+refused — rename it in the file it comes from, and this file is updated as
+one of its importers.
+
 Matching rules:
 - **Inside strings and comments**, a secret matches anywhere — `abc` is found
   inside `"abcdef"`.

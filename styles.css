@@ -119,6 +119,7 @@ main {
 }
 
 textarea.code.hidden,
+.mode-btn.hidden,
 .row-note.hidden {
   display: none;
 }
