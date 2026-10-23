@@ -12,7 +12,8 @@ or anything else sensitive to a third-party model.**
 ## How it works
 
 1. Click **Open file…** and pick a `.py` file (or paste code into the left box
-   to try it out).
+   to try it out). Its folder becomes your project; click between its files
+   on the left.
 2. Add the secrets in the **Secrets** section:
    - select text in the code and press **Ctrl/Cmd + E**, or
    - click **+ Add secret** and type or paste it (secrets can span lines), or
@@ -22,7 +23,7 @@ or anything else sensitive to a third-party model.**
 3. The right box shows what the AI will see. Switch to **Secrets file** to see
    what goes into `hidden_secrets.py`.
 4. Click **Save**. Your file is rewritten and the secrets are added to
-   `hidden_secrets.py` in the same folder (it's created if needed, and new
+   `hidden_secrets.py` in the project folder (it's created if needed, and new
    secrets are added to any already there).
 
 Each secret has a **name** — what your code uses instead of the real value
@@ -55,6 +56,20 @@ imports at the top (the import line is copied across), and other variables
 you move at the same time. If it uses something that stays in your file — say
 `LOOKUP = dict(zip(range(n), …))` with `n` defined in your file — you're told
 which name to add as a secret too.
+
+### Projects
+
+The folder of the file you open (with **Open file…** or **Recent**) is your
+project. Its Python files are listed down the left — click one to open it. A
+green ● marks files that already use the secrets file; a yellow ▲ marks files
+that import a name you're renaming, which **Save** will update too. If the open
+file has changes you haven't saved, the app asks before switching. Your
+secrets list stays when you switch, so you can hide the same things in the
+next file.
+
+A project has **one** secrets file, in its folder — files in subfolders import
+it too (`from hidden_secrets import …`), which works when you run your code
+from the project folder.
 
 ### Picking up where you left off
 

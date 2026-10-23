@@ -33,7 +33,9 @@ let nextId = 1;
 let openFile = null;
 /** Current contents of the secrets module next to that file ('' if none). */
 let existingModule = '';
-/** The other .py files in that file's folder: [{ path, text, eol }]. */
+/** The project's folder (where its secrets file lives), and its other .py
+ *  files: [{ path, text, eol }]. */
+let projectRoot = null;
 let folderFiles = [];
 let lastResult = null;
 /** Files that import from the open file and change with it: [{ path, code, changes, problems }]. */
@@ -83,9 +85,23 @@ function moduleName() {
   return moduleNameInput.value.trim();
 }
 
-/** The open file's name, as rename notes in the secrets file record it. */
+/** A path relative to the project folder, with / separators. */
+function relative(filePath) {
+  const root = (projectRoot || '').replace(/[\\/]+$/, '');
+  const rel = root && filePath.startsWith(root) ? filePath.slice(root.length).replace(/^[\\/]+/, '') : filePath;
+  return rel.replace(/\\/g, '/');
+}
+
+/** The open file as rename notes in the secrets file record it: its path in
+ *  the project (just the name for files at the top). */
 function fileName() {
-  return openFile ? openFile.path.split(/[\\/]/).pop() : 'this file';
+  return openFile ? relative(openFile.path) : 'this file';
+}
+
+/** Path of the project's secrets file. */
+function secretsFilePath() {
+  const sep = openFile && openFile.path.includes('\\') ? '\\' : '/';
+  return `${(projectRoot || '').replace(/[\\/]+$/, '')}${sep}${moduleName()}.py`;
 }
 
 /** The folder files that import from the open file, as they'd be after `map`
@@ -93,8 +109,8 @@ function fileName() {
  *  ones that change or have something to report. */
 function importersAfter(code, map) {
   if (!openFile || map.size === 0) return [];
-  const stem = fileName().replace(/\.pyw?$/, '');
-  const candidates = folderFiles.filter((f) => f.path.split(/[\\/]/).pop() !== `${moduleName()}.py`);
+  const stem = openFile.path.split(/[\\/]/).pop().replace(/\.pyw?$/, '');
+  const candidates = folderFiles.filter((f) => f.path !== secretsFilePath());
   const before = new Map(candidates.map((f) => [f.path, f.text]));
   return updateImporters(candidates, stem, map, definedIn(code)).filter(
     (o) => o.code !== before.get(o.path) || o.problems.length
@@ -296,6 +312,7 @@ function update() {
 
   el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
   renderEarlier();
+  renderProject();
   // Ask before quitting while there are secrets that haven't been saved.
   if (fileBridge) fileBridge.setUnsaved(secrets.some((s) => s.value.trim()));
   if (nameOk && secrets.length === 0 && lastOthers.some((o) => o.changes)) {
@@ -310,7 +327,7 @@ function update() {
 // ---------- files ----------
 
 function showPaths() {
-  const dir = openFile ? openFile.path.replace(/[\\/][^\\/]*$/, '') : '';
+  const dir = projectRoot || '';
   const sep = openFile && openFile.path.includes('\\') ? '\\' : '/';
   // The path boxes trim long paths from the left (CSS direction: rtl); the
   // left-to-right marks keep slashes on the correct side.
@@ -319,7 +336,7 @@ function showPaths() {
   el('output-path').textContent = openFile
     ? ltr(
         el('tab-module').classList.contains('active')
-          ? `${dir}${sep}${moduleName()}.py`
+          ? secretsFilePath()
           : el('tab-others').classList.contains('active')
             ? `${dir}${sep}…`
             : openFile.path
@@ -337,12 +354,14 @@ async function showOpened(opened, verb = 'Opened') {
   openFile = { path: opened.path, eol: opened.eol };
   input.value = opened.text;
   await loadModule();
-  folderFiles = (await fileBridge.readFolder(openFile.path)) || [];
+  const folder = (await fileBridge.readFolder(openFile.path)) || { root: null, files: [] };
+  projectRoot = folder.root;
+  folderFiles = folder.files;
   showPaths();
   update();
   await fileBridge.remember(openFile.path, moduleName());
   await refreshRecent();
-  showToast(existingModule ? `${verb} — found ${moduleName()}.py next to it` : verb);
+  showToast(existingModule ? `${verb} — using the project's ${moduleName()}.py` : verb);
 }
 
 async function openFromDisk() {
@@ -356,6 +375,81 @@ async function openRecent(filePath, verb) {
   if (!entry) return;
   moduleNameInput.value = entry.moduleName;
   await showOpened(await fileBridge.openRecent(entry.path), verb);
+}
+
+/** Open another file of the project — asking first if this one has changes
+ *  that haven't been saved. The secrets list stays, so it applies there too. */
+async function switchTo(filePath) {
+  if (!openFile || filePath === openFile.path) return;
+  const pending = lastResult && (lastResult.code !== input.value || lastResult.added || othersToSave(lastOthers).length);
+  if (
+    pending &&
+    !(await fileBridge.confirm({
+      message: `${fileName()} has changes you haven't saved.`,
+      detail: `Open ${relative(filePath)} anyway? Nothing has been changed on disk. Your secrets list stays, so you can use it on the other file.`,
+      ok: 'Open without saving'
+    }))
+  ) {
+    return;
+  }
+  await showOpened(await fileBridge.openInProject(filePath), secrets.length ? 'Opened — your secrets list applies here too' : 'Opened');
+}
+
+/** List the project's files, grouped by folder, marking the open one, the
+ *  ones that use the secrets file and the ones a save would update. */
+function renderProject() {
+  const aside = el('project');
+  aside.classList.toggle('hidden', !openFile || !projectRoot);
+  if (!openFile || !projectRoot) return;
+  el('project-name').textContent = projectRoot.split(/[\\/]/).filter(Boolean).pop() || projectRoot;
+  el('project-name').title = projectRoot;
+  const updating = new Set(lastOthers.filter((o) => o.changes).map((o) => o.path));
+  const usesSecrets = new RegExp(`^\\s*(?:from\\s+${moduleName()}\\s+import|import\\s+${moduleName()}\\b)`, 'm');
+  const textOf = new Map(folderFiles.map((f) => [f.path, f.text]));
+  textOf.set(openFile.path, input.value);
+  const entries = [...textOf.keys()]
+    .filter((p) => p !== secretsFilePath())
+    .map((p) => {
+      const rel = relative(p);
+      const cut = rel.lastIndexOf('/');
+      return { path: p, dir: cut === -1 ? '' : rel.slice(0, cut), name: rel.slice(cut + 1) };
+    })
+    .sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name) : !a.dir ? -1 : !b.dir ? 1 : a.dir.localeCompare(b.dir)));
+
+  const nav = el('project-files');
+  nav.innerHTML = '';
+  let dir = '';
+  for (const entry of entries) {
+    if (entry.dir && entry.dir !== dir) {
+      const folder = document.createElement('div');
+      folder.className = 'project-folder';
+      folder.textContent = `${entry.dir}/`;
+      nav.append(folder);
+    }
+    dir = entry.dir;
+    const button = document.createElement('button');
+    button.className = 'project-file' + (entry.dir ? ' nested' : '') + (entry.path === openFile.path ? ' active' : '');
+    button.title = relative(entry.path);
+    const name = document.createElement('span');
+    name.className = 'file-name';
+    name.textContent = entry.name;
+    button.append(name);
+    if (updating.has(entry.path)) {
+      const mark = document.createElement('span');
+      mark.className = 'mark updates';
+      mark.textContent = '▲';
+      mark.title = 'Imports a name you are renaming — Save updates it too';
+      button.append(mark);
+    } else if (usesSecrets.test(textOf.get(entry.path))) {
+      const mark = document.createElement('span');
+      mark.className = 'mark uses';
+      mark.textContent = '●';
+      mark.title = `Already uses ${moduleName()}.py`;
+      button.append(mark);
+    }
+    button.addEventListener('click', () => switchTo(entry.path));
+    nav.append(button);
+  }
 }
 
 /** Fill the Recent dropdown. */
@@ -575,6 +669,7 @@ function init() {
     input.value = '';
     openFile = null;
     existingModule = '';
+    projectRoot = null;
     folderFiles = [];
     showPaths();
     update();

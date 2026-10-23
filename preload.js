@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('files', {
   save: (payload) => ipcRenderer.invoke('file:save', payload),
   recent: () => ipcRenderer.invoke('recent:list'),
   openRecent: (filePath) => ipcRenderer.invoke('file:open-recent', filePath),
+  openInProject: (filePath) => ipcRenderer.invoke('file:open-in-project', filePath),
   remember: (filePath, moduleName) => ipcRenderer.invoke('recent:remember', filePath, moduleName),
-  setUnsaved: (value) => ipcRenderer.invoke('app:set-unsaved', value)
+  setUnsaved: (value) => ipcRenderer.invoke('app:set-unsaved', value),
+  confirm: (question) => ipcRenderer.invoke('app:confirm', question)
 });
