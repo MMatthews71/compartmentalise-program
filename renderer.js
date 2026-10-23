@@ -18,6 +18,7 @@ const {
   renameMap,
   definedIn,
   updateImporters,
+  hiddenEarlier,
   suggestName,
   variableName,
   isValidName
@@ -294,6 +295,9 @@ function update() {
   }
 
   el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
+  renderEarlier();
+  // Ask before quitting while there are secrets that haven't been saved.
+  if (fileBridge) fileBridge.setUnsaved(secrets.some((s) => s.value.trim()));
   if (nameOk && secrets.length === 0 && lastOthers.some((o) => o.changes)) {
     // Nothing new to hide, but files broken by an earlier save can be fixed.
     replaceCount.textContent = `${lastOthers.filter((o) => o.changes).length} other file(s) need updating — Save fixes them`;
@@ -327,9 +331,8 @@ async function loadModule() {
   existingModule = openFile && isValidName(moduleName()) ? (await fileBridge.readSecrets(openFile.path, moduleName())) || '' : '';
 }
 
-async function openFromDisk() {
-  if (!fileBridge) return;
-  const opened = await fileBridge.open();
+/** Show a file the main process opened, and remember it for next time. */
+async function showOpened(opened, verb = 'Opened') {
   if (!opened) return;
   openFile = { path: opened.path, eol: opened.eol };
   input.value = opened.text;
@@ -337,7 +340,63 @@ async function openFromDisk() {
   folderFiles = (await fileBridge.readFolder(openFile.path)) || [];
   showPaths();
   update();
-  showToast(existingModule ? `Opened — found ${moduleName()}.py next to it` : 'Opened');
+  await fileBridge.remember(openFile.path, moduleName());
+  await refreshRecent();
+  showToast(existingModule ? `${verb} — found ${moduleName()}.py next to it` : verb);
+}
+
+async function openFromDisk() {
+  if (!fileBridge) return;
+  await showOpened(await fileBridge.open());
+}
+
+/** Reopen a recent file, with the secrets file name it had. */
+async function openRecent(filePath, verb) {
+  const entry = (await fileBridge.recent()).find((r) => r.path === filePath);
+  if (!entry) return;
+  moduleNameInput.value = entry.moduleName;
+  await showOpened(await fileBridge.openRecent(entry.path), verb);
+}
+
+/** Fill the Recent dropdown. */
+async function refreshRecent() {
+  const select = el('recent-select');
+  const recent = fileBridge ? await fileBridge.recent() : [];
+  select.length = 1;
+  for (const r of recent) {
+    const option = new Option(r.path.split(/[\\/]/).pop(), r.path);
+    option.title = r.path;
+    select.append(option);
+  }
+  select.value = '';
+  select.disabled = recent.length === 0;
+}
+
+/** List what this file already hides, from the secrets file. */
+function renderEarlier() {
+  const items = openFile ? hiddenEarlier(input.value, existingModule, { moduleName: moduleName(), fileName: fileName() }) : [];
+  el('earlier').classList.toggle('hidden', items.length === 0);
+  el('earlier-count').textContent = String(items.length);
+  const list = el('earlier-list');
+  list.innerHTML = '';
+  for (const item of items) {
+    const row = document.createElement('div');
+    row.className = 'earlier-row';
+    const part = (cls, text) => {
+      const span = document.createElement('span');
+      span.className = cls;
+      span.textContent = text;
+      return span;
+    };
+    row.append(part('earlier-name', item.name));
+    if (item.realName !== item.name) row.append(part('earlier-value', 'is'), part('earlier-real', item.realName));
+    if (item.value) {
+      const value = item.value.length > 120 ? `${item.value.slice(0, 117)}…` : item.value;
+      row.append(part('earlier-value', `= ${value}`));
+    }
+    row.append(part('earlier-kind', item.kind === 'renamed' ? 'renamed' : 'moved out'));
+    list.append(row);
+  }
 }
 
 async function save() {
@@ -535,6 +594,11 @@ function init() {
     await loadModule();
     showPaths();
     update();
+    if (openFile && isValidName(moduleName())) await fileBridge.remember(openFile.path, moduleName());
+  });
+
+  el('recent-select').addEventListener('change', (e) => {
+    if (e.target.value) openRecent(e.target.value, 'Opened');
   });
 
   // Ctrl/Cmd+E on the input adds the current selection as a secret.
@@ -545,10 +609,20 @@ function init() {
     }
   });
 
-  if (!fileBridge) el('open-btn').disabled = true;
+  if (!fileBridge) {
+    el('open-btn').disabled = true;
+    el('recent-select').disabled = true;
+  }
   renderSecrets();
   showPaths();
   update();
+  // Pick up where you left off: reopen the last file, fresh from disk.
+  if (fileBridge) {
+    refreshRecent().then(async () => {
+      const [last] = await fileBridge.recent();
+      if (last && !openFile && !input.value) await openRecent(last.path, `Reopened ${last.path.split(/[\\/]/).pop()}`);
+    });
+  }
 }
 
 init();

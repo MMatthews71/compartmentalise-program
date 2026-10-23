@@ -434,6 +434,78 @@ textarea.code[readonly] {
   background: #2a1b1f;
 }
 
+.recent-select {
+  max-width: 150px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 7px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.recent-select:hover,
+.recent-select:focus {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.earlier {
+  margin: 4px 14px 8px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+}
+
+.earlier.hidden {
+  display: none;
+}
+
+.earlier summary {
+  cursor: pointer;
+  padding: 6px 2px;
+}
+
+.earlier-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 4px 2px;
+  border-bottom: 1px solid #1d212d;
+  font-family: var(--mono);
+  font-size: 12px;
+  user-select: text;
+  overflow: hidden;
+}
+
+.earlier-name {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.earlier-real {
+  color: var(--text);
+  flex-shrink: 0;
+}
+
+.earlier-value {
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.earlier-kind {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-family: var(--sans);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 .privacy-note {
   margin: 4px 14px 14px;
   font-size: 12px;

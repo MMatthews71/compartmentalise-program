@@ -9,5 +9,9 @@ contextBridge.exposeInMainWorld('files', {
   open: () => ipcRenderer.invoke('file:open'),
   readSecrets: (sourcePath, moduleName) => ipcRenderer.invoke('file:read-secrets', sourcePath, moduleName),
   readFolder: (sourcePath) => ipcRenderer.invoke('file:read-folder', sourcePath),
-  save: (payload) => ipcRenderer.invoke('file:save', payload)
+  save: (payload) => ipcRenderer.invoke('file:save', payload),
+  recent: () => ipcRenderer.invoke('recent:list'),
+  openRecent: (filePath) => ipcRenderer.invoke('file:open-recent', filePath),
+  remember: (filePath, moduleName) => ipcRenderer.invoke('recent:remember', filePath, moduleName),
+  setUnsaved: (value) => ipcRenderer.invoke('app:set-unsaved', value)
 });
