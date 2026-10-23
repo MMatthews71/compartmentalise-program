@@ -16,6 +16,7 @@ const {
   restoreNames,
   renamesFor,
   renameMap,
+  moduleAliases,
   definedIn,
   updateImporters,
   hiddenEarlier,
@@ -104,17 +105,36 @@ function secretsFilePath() {
   return `${(projectRoot || '').replace(/[\\/]+$/, '')}${sep}${moduleName()}.py`;
 }
 
-/** The folder files that import from the open file, as they'd be after `map`
- *  (old name -> new name) is applied to it, given its new `code`. Only the
- *  ones that change or have something to report. */
-function importersAfter(code, map) {
-  if (!openFile || map.size === 0) return [];
+/** The project files that follow the open file's renames, as they'd be with
+ *  its new `code` and the secrets module's new `moduleText`:
+ *  - files importing from the open file switch names in `map` (old -> new);
+ *  - files importing a renamed variable straight from the secrets module
+ *    (`NEW = OLD` there) switch to NEW.
+ *  Only the ones that change or have something to report. */
+function importersAfter(code, map, moduleText) {
+  if (!openFile) return [];
   const stem = openFile.path.split(/[\\/]/).pop().replace(/\.pyw?$/, '');
   const candidates = folderFiles.filter((f) => f.path !== secretsFilePath());
   const before = new Map(candidates.map((f) => [f.path, f.text]));
-  return updateImporters(candidates, stem, map, definedIn(code)).filter(
-    (o) => o.code !== before.get(o.path) || o.problems.length
-  );
+  const byPath = new Map();
+  const merge = (results) => {
+    for (const o of results) {
+      const prev = byPath.get(o.path);
+      byPath.set(o.path, {
+        path: o.path,
+        code: o.code,
+        changes: (prev ? prev.changes : 0) + o.changes,
+        problems: (prev ? prev.problems : []).concat(o.problems)
+      });
+    }
+  };
+  if (map.size) merge(updateImporters(candidates, stem, map, definedIn(code)));
+  const aliases = moduleAliases(moduleText);
+  if (aliases.size) {
+    const current = candidates.map((f) => ({ path: f.path, text: byPath.has(f.path) ? byPath.get(f.path).code : f.text }));
+    merge(updateImporters(current, moduleName(), aliases, (name) => !aliases.has(name)));
+  }
+  return [...byPath.values()].filter((o) => o.code !== before.get(o.path) || o.problems.length);
 }
 
 /** The changed importers, ready to hand to the save bridge. */
@@ -281,7 +301,9 @@ function update() {
 
   lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule, fileName: fileName() });
   // Files that import from this one must follow its renames, or they'd break.
-  lastOthers = nameOk ? importersAfter(lastResult.code, renameMap(lastResult.renamed, lastResult.moduleText, fileName())) : [];
+  lastOthers = nameOk
+    ? importersAfter(lastResult.code, renameMap(lastResult.renamed, lastResult.moduleText, fileName()), lastResult.moduleText)
+    : [];
   showOthers();
   output.value = lastResult.code;
   moduleOutput.value = lastResult.moduleText;
@@ -530,7 +552,9 @@ async function putNamesBack() {
   const result = restoreNames(input.value, existingModule, { moduleName: moduleName(), fileName: fileName() });
   const stuck = result.renames.filter((r) => result.results.get(r.id).problems.length);
   // Files that import the renamed names go back too.
-  const others = othersToSave(importersAfter(result.code, new Map(result.restored.map((r) => [r.to, r.from]))));
+  const others = othersToSave(
+    importersAfter(result.code, new Map(result.restored.map((r) => [r.to, r.from])), result.moduleText)
+  );
   const saved = await fileBridge.save({
     sourcePath: openFile.path,
     sourceText: result.code,

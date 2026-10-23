@@ -114,6 +114,13 @@ nothing breaks and the old name doesn't linger there either. They're shown
 under **Other files** before you save, and **Put names back** changes them
 back as well.
 
+The same goes for a variable that lives in the secrets file: rename
+`MONTH_CODES` to `CODES` while editing one file, and every other file in the
+project that gets it with `from hidden_secrets import MONTH_CODES` (or
+`import hidden_secrets as hs` … `hs.MONTH_CODES`) switches to `CODES` too — so
+the old name ends up only in the secrets file. Files saved before the rename
+are picked up the next time you save any file of the project.
+
 This also fixes files broken by an earlier save: if another file still
 imports a name the secrets file shows was renamed, opening the file it comes
 from offers to update it.

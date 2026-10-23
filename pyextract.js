@@ -1186,6 +1186,18 @@
     return map;
   }
 
+  /** Renamed variables in the secrets module: OLD -> NEW for each
+   *  `NEW = OLD` line where OLD is itself defined there. Files that import
+   *  OLD straight from the module should say NEW too. */
+  function moduleAliases(moduleText) {
+    const defs = parseModule(moduleText);
+    const map = new Map();
+    for (const [name, value] of defs) {
+      if (value !== name && isValidName(value) && defs.has(value)) map.set(value, name);
+    }
+    return map;
+  }
+
   /** A test for which names `code` defines (or imports), for checking what
    *  another file can still import from it. */
   function definedIn(code) {
@@ -1320,6 +1332,7 @@
     restoreNames,
     renamesFor,
     renameMap,
+    moduleAliases,
     definedIn,
     updateImporters,
     hiddenEarlier,

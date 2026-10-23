@@ -389,3 +389,40 @@ test('an import broken by an earlier save is repaired from the secrets file', ()
   );
   assert.match(stuck.problems[0], /doesn't have it any more/);
 });
+
+test('a variable renamed in the secrets file is renamed in every file that imports it from there', (t) => {
+  const { moduleAliases, updateImporters } = require('../pyextract.js');
+  const moduleText = 'MONTH_CODES = {"JAN": "F", "MAY": "K"}\n';
+  const files = {
+    'pipeline.py': 'from hidden_secrets import MONTH_CODES\nx = MONTH_CODES["JAN"]\n',
+    'report.py': 'from hidden_secrets import MONTH_CODES, OTHER\n# counts MONTH_CODES\nr = (len(MONTH_CODES), OTHER)\n',
+    'module.py': 'import hidden_secrets as hs\nr = hs.MONTH_CODES["MAY"]\n',
+    'taken.py': 'from hidden_secrets import MONTH_CODES\nCODES = 1\nr = (MONTH_CODES["JAN"], CODES)\n'
+  };
+  const fullModule = moduleText + 'OTHER = 2\n';
+  // Rename it while editing pipeline.py: the module gains CODES = MONTH_CODES.
+  const out = extract(files['pipeline.py'], secretsOf(['MONTH_CODES', 'CODES']), { existingModule: fullModule, fileName: 'pipeline.py' });
+  assert.match(out.moduleText, /^CODES = MONTH_CODES$/m);
+  const aliases = moduleAliases(out.moduleText);
+  assert.deepStrictEqual([...aliases], [['MONTH_CODES', 'CODES']]);
+  const others = Object.keys(files).filter((f) => f !== 'pipeline.py');
+  const updated = updateImporters(others.map((p) => ({ path: p, text: files[p] })), 'hidden_secrets', aliases, (n) => !aliases.has(n));
+  const after = Object.fromEntries(updated.map((u) => [u.path, u.code]));
+  assert.strictEqual(after['report.py'], 'from hidden_secrets import CODES, OTHER\n# counts CODES\nr = (len(CODES), OTHER)\n');
+  assert.strictEqual(after['module.py'], 'import hidden_secrets as hs\nr = hs.CODES["MAY"]\n');
+  assert.strictEqual(after['taken.py'], 'from hidden_secrets import CODES as MONTH_CODES\nCODES = 1\nr = (MONTH_CODES["JAN"], CODES)\n');
+  assert.deepStrictEqual(updated.map((u) => u.problems.length), [0, 0, 1]);
+  if (python) {
+    // Every file computes the same thing before and after.
+    const run = (set) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'aliases-'));
+      for (const [name, text] of Object.entries(set)) fs.writeFileSync(path.join(dir, name), text);
+      const script = `import sys, json, importlib\nsys.path.insert(0, ${JSON.stringify(dir)})\nprint(json.dumps({m: repr(importlib.import_module(m).r) for m in ${JSON.stringify(others.map((f) => f.slice(0, -3)))}}))`;
+      const res = JSON.parse(execFileSync(python, ['-c', script], { encoding: 'utf8' }));
+      fs.rmSync(dir, { recursive: true, force: true });
+      return res;
+    };
+    const before = run({ ...files, 'hidden_secrets.py': fullModule });
+    assert.deepStrictEqual(run({ ...files, ...after, 'pipeline.py': out.code, 'hidden_secrets.py': out.moduleText }), before);
+  }
+});
