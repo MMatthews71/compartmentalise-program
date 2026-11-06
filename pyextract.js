@@ -770,6 +770,8 @@
           return name;
         }
         if (taken.get(name) === key) return name;
+        // NEW = OLD (a renamed variable) holds the same value as OLD.
+        if (!fixed && isValidName(taken.get(name)) && taken.get(taken.get(name)) === key) return name;
         if (fixed) return null;
       }
     }
@@ -1307,6 +1309,58 @@
     return found;
   }
 
+  /**
+   * The values a secrets module holds, as secrets that can be hidden again in
+   * other files: [{ name, value }]. A plain string gives its text (so it is
+   * found inside other strings too); a number-free literal such as a list or
+   * dict gives its source. Skipped (counted in `skipped`): aliases from
+   * renames (`CODES = MONTH_CODES`), values built from other names, numbers,
+   * True/False/None, f-strings and strings under 3 characters — swapping
+   * those for a name everywhere would change, or wreck, what code does.
+   * Returns { secrets, skipped }.
+   */
+  function moduleSecrets(moduleText) {
+    const text = moduleText || '';
+    const tokens = lex(text);
+    const found = [];
+    let skipped = 0;
+    for (const a of topLevelAssignments(text, topLevel(text, tokens))) {
+      let s = a.valueAt;
+      let e = a.e;
+      // Drop a trailing comment.
+      const inRange = tokens.filter((t) => t.start >= s && t.end <= e);
+      const last = inRange[inRange.length - 1];
+      if (last && last.type === 'comment' && !text.slice(last.end, e).trim()) e = last.start;
+      const raw = text.slice(s, e).trim();
+      if (!raw || isValidName(raw) || /^[-+]?[\d.][\w.+-]*$/.test(raw) || /^(True|False|None)$/.test(raw)) {
+        skipped++;
+        continue;
+      }
+      const first = inRange[0];
+      const single = first && first.type === 'string' && text.slice(s, first.start).trim() === '' && first === inRange.filter((t) => t.type === 'string').pop() && !text.slice(first.end, e).trim();
+      if (single) {
+        if (/f/i.test(first.prefix) || !first.closed) {
+          skipped++;
+          continue;
+        }
+        const content = text.slice(first.contentStart, first.contentEnd);
+        if (content.trim().length < 3) {
+          skipped++;
+          continue;
+        }
+        found.push({ name: a.name, value: content });
+        continue;
+      }
+      const uses = [...freeNames(codeOnly(text, tokens, s, e))].filter((n) => !BUILTINS.has(n));
+      if (uses.length) {
+        skipped++;
+        continue;
+      }
+      found.push({ name: a.name, value: raw });
+    }
+    return { secrets: found, skipped };
+  }
+
   /** First free SECRET_n name, avoiding `taken` (a Set) and names in src/module. */
   function suggestName(taken, src, moduleText) {
     const inCode = namesInCode(src || '');
@@ -1336,6 +1390,7 @@
     definedIn,
     updateImporters,
     hiddenEarlier,
+    moduleSecrets,
     suggestName,
     variableName,
     isValidName,

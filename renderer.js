@@ -20,6 +20,7 @@ const {
   definedIn,
   updateImporters,
   hiddenEarlier,
+  moduleSecrets,
   suggestName,
   variableName,
   isValidName
@@ -39,8 +40,13 @@ let existingModule = '';
 let projectRoot = null;
 let folderFiles = [];
 let lastResult = null;
-/** Files that import from the open file and change with it: [{ path, code, changes, problems }]. */
+/** Other project files that change on Save — they import from the open file,
+ *  or they hold the same secrets: [{ path, code, changes, problems }]. */
 let lastOthers = [];
+/** The secrets module as Save would write it, after every file has added to it. */
+let lastModule = '';
+/** Per secret: how many spots in the other files get hidden. */
+let otherHits = new Map();
 
 // ---------- element handles ----------
 const el = (id) => document.getElementById(id);
@@ -164,6 +170,168 @@ function showOthers() {
     .join('\n\n');
 }
 
+// ---------- the same secrets, in every file ----------
+
+// Ids for the extra "move this whole variable" secrets made for a file that
+// has its own copy of a variable the secrets file already holds.
+const DERIVED = 1e9;
+
+/** Secrets that are values (not variable names), so they can be hidden in
+ *  any file of the project, not just the open one. Variable names are
+ *  handled per file: other files that import them follow along already. */
+function spreadable(list) {
+  return list.filter((s) => {
+    const v = s.value.trim();
+    return s.mode !== 'rename' && v && isValidName(s.name.trim()) && !isValidName(v) && !variableName(v);
+  });
+}
+
+/** What to hide in the other files: every value secret, plus the value of
+ *  every variable secret that is in the secrets module (moved now or by an
+ *  earlier save), under the name the open file uses for it. */
+function spreadList(moduleText) {
+  const list = spreadable(secrets);
+  const vars = secrets.filter((s) => {
+    const v = s.value.trim();
+    return s.mode !== 'rename' && v && isValidName(s.name.trim()) && (isValidName(v) || variableName(v));
+  });
+  if (vars.length) {
+    const values = new Map(moduleSecrets(moduleText).secrets.map((x) => [x.name, x.value]));
+    for (const s of vars) {
+      const v = s.value.trim();
+      const real = isValidName(v) ? v : variableName(v);
+      if (values.has(real)) list.push({ id: s.id, value: values.get(real), name: s.name.trim(), mode: 'move' });
+    }
+  }
+  return list;
+}
+
+/** `list` plus, for each of `values` whose name the secrets module already
+ *  defines and `src` also defines at the top level (its own copy), a secret
+ *  that moves that definition — so the file imports it instead of keeping
+ *  the value. If the copy's value differs, extract leaves it and says so. */
+function withOwnCopies(src, list, values, moduleText) {
+  const defs = parseModuleNames(moduleText);
+  const extra = [];
+  for (const s of values) {
+    const name = s.name.trim();
+    if (!defs.has(name) || list.some((x) => x.value.trim() === name)) continue;
+    if (!new RegExp(`^${name}[ \\t]*(?::[^=\\n]*)?=(?!=)`, 'm').test(src)) continue;
+    if (variableName(name, src) !== name) continue;
+    extra.push({ id: DERIVED + s.id, value: name, name, mode: 'move' });
+  }
+  return extra.length ? list.concat(extra) : list;
+}
+
+function parseModuleNames(moduleText) {
+  return new Set([...(moduleText || '').matchAll(/^([A-Za-z_]\w*)[ \t]*(?::[^=\n]*)?=(?!=)/gm)].map((m) => m[1]));
+}
+
+/** Fold the results of derived secrets back into the secret they came from. */
+function foldDerived(results) {
+  const out = new Map();
+  for (const [id, r] of results) {
+    if (id < DERIVED) out.set(id, { hidden: r.hidden, problems: r.problems.slice() });
+  }
+  for (const [id, r] of results) {
+    if (id < DERIVED) continue;
+    const base = out.get(id - DERIVED) || { hidden: 0, problems: [] };
+    base.hidden += r.hidden;
+    base.problems.push(...r.problems);
+    // The value itself was "already used in this file": moving the whole
+    // copy fixed that, so drop the complaint.
+    if (r.hidden) base.problems = base.problems.filter((p) => !/is already used in this file/.test(p.reason));
+    out.set(id - DERIVED, base);
+  }
+  return out;
+}
+
+/** The longest run of non-space characters in a value: if a file doesn't
+ *  contain it, the value can't be in that file. */
+function probe(value) {
+  return value.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), '');
+}
+
+/**
+ * Hide the open file's value secrets in every other project file too.
+ * `others` are the files already changing (importers following renames);
+ * each file's result builds on those, and every file adds to the same
+ * secrets module, so a value gets one name everywhere.
+ * Returns { others, moduleText, hits: Map<secretId, number> }.
+ */
+function spreadToOthers(others, moduleText) {
+  const hits = new Map();
+  if (!openFile || !isValidName(moduleName())) return { others, moduleText, hits };
+  const list = spreadList(moduleText);
+  if (list.length === 0) return { others, moduleText, hits };
+  const byPath = new Map(others.map((o) => [o.path, o]));
+  const probes = list.map((s) => probe(s.value.trim()));
+  let mod = moduleText;
+  for (const f of folderFiles) {
+    if (f.path === secretsFilePath() || f.path === openFile.path) continue;
+    const prev = byPath.get(f.path);
+    const current = prev ? prev.code : f.text;
+    const names = parseModuleNames(mod);
+    const hasValue = probes.some((p) => current.includes(p));
+    const hasCopy = list.some((s) => names.has(s.name.trim()) && current.includes(s.name.trim()));
+    if (!hasValue && !hasCopy) continue;
+    const r = extract(current, withOwnCopies(current, list, list, mod), { moduleName: moduleName(), existingModule: mod, fileName: relative(f.path) });
+    const results = foldDerived(r.results);
+    let changes = 0;
+    const problems = [];
+    for (const s of list) {
+      const res = results.get(s.id) || { hidden: 0, problems: [] };
+      changes += res.hidden;
+      if (res.hidden) hits.set(s.id, (hits.get(s.id) || 0) + res.hidden);
+      const label = s.value.trim().split('\n')[0].slice(0, 40);
+      for (const p of res.problems) problems.push(`${label} left visible — line ${p.line}: ${p.reason}`);
+    }
+    if (!changes && !problems.length) continue;
+    if (changes) mod = r.moduleText;
+    byPath.set(f.path, {
+      path: f.path,
+      code: changes ? r.code : current,
+      changes: (prev ? prev.changes : 0) + changes,
+      problems: (prev ? prev.problems : []).concat(problems)
+    });
+  }
+  return { others: [...byPath.values()], moduleText: mod, hits };
+}
+
+/** Load every value in the project's secrets file into the secrets list, so
+ *  Save hides them in every file that still has them. */
+async function useSecretsFile() {
+  let text = existingModule;
+  let from = `${moduleName()}.py`;
+  if (!text.trim()) {
+    if (!fileBridge) return;
+    const picked = await fileBridge.pickSecretsFile();
+    if (!picked) return;
+    text = picked.text;
+    from = picked.name;
+  }
+  const { secrets: found, skipped } = moduleSecrets(text);
+  const have = new Set(secrets.map((s) => s.value.trim()));
+  let added = 0;
+  for (const f of found) {
+    if (have.has(f.value.trim())) continue;
+    secrets.push({ id: nextId++, value: f.value, name: f.name, mode: 'move' });
+    added++;
+  }
+  renderSecrets();
+  update();
+  if (!found.length) {
+    showToast(`No values to use in ${from}${skipped ? ` (${skipped} skipped)` : ''}`);
+    return;
+  }
+  const files = lastOthers.filter((o) => o.changes).length;
+  showToast(
+    `Added ${added} ${added === 1 ? 'value' : 'values'} from ${from}` +
+      (skipped ? ` · ${skipped} skipped` : '') +
+      (openFile ? ` · Save hides them in ${files} other ${files === 1 ? 'file' : 'files'}` : '')
+  );
+}
+
 // ---------- secrets model ----------
 
 function addSecret(value = '') {
@@ -277,11 +445,15 @@ function fitToContent(textarea) {
 /** Write each row's moved count and any spots that had to stay visible. */
 function updateRows(results) {
   for (const row of secretsList.children) {
-    const result = results.get(Number(row.dataset.id)) || { hidden: 0, problems: [] };
+    const id = Number(row.dataset.id);
+    const result = results.get(id) || { hidden: 0, problems: [] };
+    const elsewhere = otherHits.get(id) || 0;
+    const total = result.hidden + elsewhere;
     const badge = row.querySelector('.hit-badge');
-    badge.textContent = String(result.hidden);
-    badge.classList.toggle('zero', result.hidden === 0);
-    badge.classList.toggle('live', result.hidden > 0);
+    badge.textContent = String(total);
+    badge.title = elsewhere ? `${result.hidden} in this file · ${elsewhere} in other files` : '';
+    badge.classList.toggle('zero', total === 0);
+    badge.classList.toggle('live', total > 0);
 
     const note = row.querySelector('.row-note');
     const shown = result.problems.slice(0, 3).map((p) => `line ${p.line}: ${p.reason}`);
@@ -299,14 +471,21 @@ function update() {
   moduleNameInput.classList.toggle('invalid', !nameOk);
   el('module-file-name').textContent = `${name || '?'}.py`;
 
-  lastResult = extract(input.value, nameOk ? secrets : [], { moduleName: name, existingModule, fileName: fileName() });
+  const list = nameOk ? withOwnCopies(input.value, secrets, spreadable(secrets), existingModule) : [];
+  lastResult = extract(input.value, list, { moduleName: name, existingModule, fileName: fileName() });
+  lastResult.results = foldDerived(lastResult.results);
   // Files that import from this one must follow its renames, or they'd break.
   lastOthers = nameOk
     ? importersAfter(lastResult.code, renameMap(lastResult.renamed, lastResult.moduleText, fileName()), lastResult.moduleText)
     : [];
+  // And the same secrets get hidden in every other file that has them.
+  const spread = spreadToOthers(lastOthers, lastResult.moduleText);
+  lastOthers = spread.others;
+  lastModule = spread.moduleText;
+  otherHits = spread.hits;
   showOthers();
   output.value = lastResult.code;
-  moduleOutput.value = lastResult.moduleText;
+  moduleOutput.value = lastModule;
   updateRows(lastResult.results);
 
   let moved = 0;
@@ -315,6 +494,7 @@ function update() {
     moved += r.hidden;
     visible += r.problems.length;
   }
+  for (const n of otherHits.values()) moved += n;
   if (!nameOk) {
     replaceCount.textContent = "⚠ the secrets file name isn't a valid Python name";
     replaceCount.style.color = 'var(--danger)';
@@ -333,6 +513,9 @@ function update() {
   }
 
   el('save-btn').disabled = !fileBridge || !openFile || !nameOk;
+  el('use-secrets-btn').title = existingModule.trim()
+    ? `Add every value in ${name || '?'}.py to the list, so Save hides them in every file that still has them`
+    : 'Pick a secrets file and add its values to the list';
   renderEarlier();
   renderProject();
   // Ask before quitting while there are secrets that haven't been saved.
@@ -460,7 +643,7 @@ function renderProject() {
       const mark = document.createElement('span');
       mark.className = 'mark updates';
       mark.textContent = '▲';
-      mark.title = 'Imports a name you are renaming — Save updates it too';
+      mark.title = 'Save updates this file too (it has the same secrets, or imports a name you are renaming)';
       button.append(mark);
     } else if (usesSecrets.test(textOf.get(entry.path))) {
       const mark = document.createElement('span');
@@ -526,7 +709,7 @@ async function save() {
     sourcePath: openFile.path,
     sourceText: lastResult.code,
     moduleName: moduleName(),
-    secretsText: lastResult.moduleText,
+    secretsText: lastModule,
     eol: openFile.eol,
     others
   });
@@ -535,10 +718,11 @@ async function save() {
     showToast(`Couldn't save: ${result.error}`);
     return;
   }
-  const changed = [...lastResult.results.values()].reduce((n, r) => n + r.hidden, 0);
+  const changed =
+    [...lastResult.results.values()].reduce((n, r) => n + r.hidden, 0) + [...otherHits.values()].reduce((a, b) => a + b, 0);
   // The file on disk is now the safe version; carry on from there.
   input.value = lastResult.code;
-  existingModule = lastResult.moduleText;
+  existingModule = lastModule;
   rememberSaved(others);
   secrets = [];
   renderSecrets();
@@ -688,6 +872,7 @@ function init() {
   el('open-btn').addEventListener('click', openFromDisk);
   el('save-btn').addEventListener('click', save);
   el('restore-names-btn').addEventListener('click', putNamesBack);
+  el('use-secrets-btn').addEventListener('click', useSecretsFile);
 
   el('clear-input-btn').addEventListener('click', () => {
     input.value = '';

@@ -261,6 +261,21 @@ function registerFileHandlers() {
     return fs.existsSync(secretsPath) ? readText(secretsPath).text : null;
   });
 
+  // Read (never write) a secrets file chosen by hand, to reuse its values.
+  ipcMain.handle('file:pick-secrets', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a secrets file to reuse',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Python', extensions: ['py'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    });
+    if (canceled || filePaths.length === 0) return null;
+    if (fs.statSync(filePaths[0]).size > MAX_FILE_BYTES) return null;
+    return { name: path.basename(filePaths[0]), text: readText(filePaths[0]).text };
+  });
+
   ipcMain.handle('file:save', async (_event, { sourcePath, sourceText, moduleName, secretsText, eol, restoring, others = [] }) => {
     try {
       if (!openedPath || sourcePath !== openedPath) throw new Error('Open the file again before saving');
@@ -275,7 +290,7 @@ function registerFileHandlers() {
         }
       }
       const othersList = others.length
-        ? `\n\nand updates ${others.length} other ${others.length === 1 ? 'file that imports' : 'files that import'} from it:\n` +
+        ? `\n\nand updates ${others.length} other ${others.length === 1 ? 'file' : 'files'} (same secrets hidden, or imports kept working):\n` +
           others.map((o) => `  ${path.relative(projectRoot || path.dirname(sourcePath), o.path)}`).join('\n')
         : '';
       const { response } = await dialog.showMessageBox(mainWindow, {
