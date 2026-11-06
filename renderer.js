@@ -137,6 +137,64 @@ function addSecrets(values) {
   secretsChanged();
 }
 
+/** Import terms from a secrets file the user already has. */
+async function importSecretsFile() {
+  if (!bridge) {
+    showToast('File access is unavailable in this build');
+    return;
+  }
+  let res;
+  try {
+    res = await bridge.importSecretsFile();
+  } catch (_) {
+    showToast('Could not read that file');
+    return;
+  }
+  if (!res || res.canceled) return;
+  if (res.error) {
+    alert(res.error);
+    return;
+  }
+
+  const { entries, skipped } = Core.parseSecretsFile(res.text);
+  const usedPh = new Set(secrets.map((s) => s.placeholder));
+  let added = 0;
+  let already = 0;
+  for (const e of entries) {
+    if (secrets.some((s) => s.value === e.value)) {
+      already += 1;
+      continue;
+    }
+    let ph = e.placeholder;
+    if (ph && usedPh.has(ph)) {
+      const base = ph.replace(/__$/, '');
+      let n = 2;
+      while (usedPh.has(`${base}_${n}__`)) n += 1;
+      ph = `${base}_${n}__`;
+    }
+    if (!ph) ph = freshPlaceholder();
+    usedPh.add(ph);
+    secrets.push({ id: nextId++, value: e.value, placeholder: ph });
+    added += 1;
+  }
+  syncPlaceholderCounter();
+  renderSecrets();
+  secretsChanged();
+
+  if (added === 0 && entries.length === 0) {
+    alert(`No terms found in ${res.name}.`);
+    return;
+  }
+  let msg = `Imported ${plural(added, 'term')} from ${res.name}`;
+  if (already) msg += ` · ${already} already hidden`;
+  if (skipped) msg += ` · ${skipped} skipped (numbers, true/false, very short or non-literal values)`;
+  if (folder) {
+    refreshFolderNow();
+    msg += ` · ${plural(folderTotal, 'hit')} across the folder`;
+  }
+  showToast(msg);
+}
+
 function addSecret(value = '', placeholder = '') {
   secrets.push({ id: nextId++, value, placeholder: placeholder || freshPlaceholder() });
   renderSecrets();
@@ -877,6 +935,7 @@ function init() {
   restoreInput.addEventListener('input', restore);
 
   el('add-secret-btn').addEventListener('click', () => addSecret());
+  el('import-secrets-btn').addEventListener('click', importSecretsFile);
   el('clear-secrets-btn').addEventListener('click', clearSecrets);
   el('detect-btn').addEventListener('click', autoDetect);
 

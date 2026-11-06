@@ -128,6 +128,110 @@
 
   const IDENT_SAFE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+  /** "db.password" -> "__DB_PASSWORD__" */
+  function placeholderFromName(name) {
+    const core = String(name)
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return core ? `__${core}__` : '';
+  }
+
+  const MIN_LEN = 3; // hiding "1" or "on" everywhere would wreck the code
+
+  /**
+   * Read a secrets file someone already has and return the terms to hide.
+   * Understands:
+   *  - Compartmentalise's own secrets.json  {secrets:[{value, placeholder}]}
+   *  - a JSON array of strings or {value, placeholder} objects
+   *  - a JSON object of names -> values (nested objects are flattened)
+   *  - KEY=value / KEY = "value" / key: value lines (.env, Python, YAML, INI)
+   *  - otherwise, one term per line
+   * Numbers and true/false are skipped: swapping them for a placeholder name
+   * would change what the code does.
+   *
+   * @returns {{entries:{value:string, placeholder:string}[], skipped:number}}
+   */
+  function parseSecretsFile(text) {
+    const entries = [];
+    let skipped = 0;
+    const add = (value, placeholder) => {
+      if (typeof value !== 'string') {
+        skipped += 1;
+        return;
+      }
+      if (value.length < MIN_LEN || /^(true|false|null|none|yes|no)$/i.test(value) || /^-?\d+(\.\d+)?$/.test(value)) {
+        skipped += 1;
+        return;
+      }
+      entries.push({ value, placeholder: placeholder || '' });
+    };
+
+    const src = text.replace(/^﻿/, '');
+    let data;
+    let isJson = false;
+    try {
+      data = JSON.parse(src);
+      isJson = data !== null && typeof data === 'object';
+    } catch (_) {
+      isJson = false;
+    }
+
+    if (isJson) {
+      const list = Array.isArray(data) ? data : Array.isArray(data.secrets) ? data.secrets : null;
+      if (list) {
+        for (const item of list) {
+          if (typeof item === 'string') add(item, '');
+          else if (item && typeof item === 'object') {
+            add(item.value, typeof item.placeholder === 'string' ? item.placeholder : placeholderFromName(item.name || ''));
+          } else skipped += 1;
+        }
+      } else {
+        const walk = (obj, prefix) => {
+          for (const [k, v] of Object.entries(obj)) {
+            const name = prefix ? `${prefix}_${k}` : k;
+            if (v && typeof v === 'object' && !Array.isArray(v)) walk(v, name);
+            else if (Array.isArray(v)) v.forEach((x) => add(x, ''));
+            else add(v, placeholderFromName(name));
+          }
+        };
+        walk(data, '');
+      }
+      return { entries, skipped };
+    }
+
+    const ASSIGN = /^\s*(?:export\s+)?["']?([A-Za-z_][\w.-]*)["']?\s*(?::|=)\s*(.*?)\s*[,;]?\s*$/;
+    const lines = src.split(/\r?\n/);
+    const assigned = [];
+    const plain = [];
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t.startsWith('#') || t.startsWith('//') || t.startsWith(';') || /^\[.*\]$/.test(t)) continue;
+      const m = ASSIGN.exec(line);
+      if (m && !/^(import|from|def|class|if|for|return)\b/.test(t)) {
+        let raw = m[2];
+        let value;
+        const q = /^(?:[rbuf]{0,2})(["'`])(.*)\1$/i.exec(raw);
+        if (q) value = q[2];
+        else if (/[()[\]{}]/.test(raw) || raw === '') value = null; // code, not a literal
+        else value = raw.replace(/\s+#.*$/, '');
+        assigned.push({ name: m[1], value });
+      } else {
+        plain.push(t);
+      }
+    }
+    if (assigned.length) {
+      for (const a of assigned) {
+        if (a.value == null) skipped += 1;
+        else add(a.value, placeholderFromName(a.name));
+      }
+    } else {
+      for (const t of plain) add(t, '');
+    }
+    return { entries, skipped };
+  }
+
   const api = {
     escapeRegExp,
     jsonInner,
@@ -136,7 +240,9 @@
     makeEngine,
     badPathReason,
     parsesAsJson,
-    IDENT_SAFE
+    IDENT_SAFE,
+    placeholderFromName,
+    parseSecretsFile
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -46,6 +46,21 @@ Shortcuts:
    can pick your original project folder to apply the AI's changes directly
    onto it.
 
+**Already have a secrets file?** Click **Import secrets file…** (in the
+secrets panel) and pick it. Every value in it is hidden across the whole
+folder at once, with placeholders named after your variables (`API_KEY` →
+`__API_KEY__`). It understands:
+- `.env` files (`API_KEY=…`, `export TOKEN="…"`)
+- Python files (`API_KEY = "…"`)
+- YAML/INI-style `key: value` lines
+- JSON objects (`{"apiKey": "…", "db": {"password": "…"}}`)
+- Compartmentalise's own `secrets.json`
+- a plain list, one term per line
+
+Numbers, `true`/`false`, very short values and non-literal values (like
+`os.getenv(...)`) are skipped, because replacing them would change what the
+code does. Add them by hand if you really want them hidden.
+
 The real values are saved in `compartmentalise-secrets/secrets.json` inside your
 project. That folder is never included in a safe copy, and it holds its own
 `.gitignore`, so git ignores it without you editing yours. When you open the

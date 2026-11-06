@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('fsBridge', {
   openProject: () => ipcRenderer.invoke('folder:open-project'),
   /** Pick any folder (e.g. the AI's edited copy) and read it. */
   openOther: (title) => ipcRenderer.invoke('folder:open-other', { title }),
+  /** Pick a secrets file the user already has and return its text. */
+  importSecretsFile: () => ipcRenderer.invoke('secrets:import'),
   /** Save the secret list into <project>/compartmentalise-secrets/. */
   saveSecrets: (rootId, secrets) => ipcRenderer.invoke('secrets:save', { rootId, secrets }),
   /** Ask where to write, then write/copy the given files there. */

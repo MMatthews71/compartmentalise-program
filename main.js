@@ -234,6 +234,22 @@ ipcMain.handle('folder:open-other', async (_e, { title } = {}) => {
   return result || { canceled: true };
 });
 
+ipcMain.handle('secrets:import', async () => {
+  const res = await dialog.showOpenDialog(mainWindow, {
+    title: 'Choose your secrets file',
+    properties: ['openFile'],
+    filters: [
+      { name: 'Secrets files', extensions: ['json', 'env', 'py', 'txt', 'yaml', 'yml', 'ini', 'cfg', 'toml'] },
+      { name: 'All files', extensions: ['*'] }
+    ]
+  });
+  if (res.canceled || !res.filePaths[0]) return { canceled: true };
+  const file = res.filePaths[0];
+  const stat = await fs.stat(file);
+  if (stat.size > 5 * 1024 * 1024) return { error: 'That file is too big to be a secrets file.' };
+  return { name: path.basename(file), text: await fs.readFile(file, 'utf8') };
+});
+
 ipcMain.handle('secrets:save', async (_e, { rootId, secrets }) => {
   const root = roots.get(rootId);
   if (!root || !Array.isArray(secrets)) return { ok: false, error: 'Unknown folder' };
