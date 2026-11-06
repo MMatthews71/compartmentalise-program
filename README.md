@@ -71,6 +71,34 @@ A project has **one** secrets file, in its folder — files in subfolders import
 it too (`from hidden_secrets import …`), which works when you run your code
 from the project folder.
 
+### The same secrets, hidden in every file
+
+You only have to mark a secret once. When you **Save**, every other `.py`
+file in the project that has the same value is rewritten too: the value is
+swapped for the same name and the file gets `from hidden_secrets import …`.
+So mark `"db.acme.internal"` as `DB_HOST` in one file, and
+`"https://db.acme.internal/v1"` in another file becomes `f"https://{DB_HOST}/v1"`.
+Mark a variable like `API_KEY`, and its value is hidden wherever it appears in
+the other files.
+
+If another file has its own copy of a variable that's already in the secrets
+file, with the same value (`API_KEY = "sk-live…"` in both), that line is
+removed and the file imports it instead. If the value differs, it's left
+alone and listed in red. The values never get swapped for each other.
+
+The secrets file only ever gets one entry per value, and the numbers next to
+each secret count both: hover over one to see how many are in this file and
+how many are in the others. The files that will change are marked ▲ on the
+left and listed under **Other files** before you save.
+
+**Already have a secrets file?** Click **Use secrets file**. Every value in
+the project's `hidden_secrets.py` is added to the list under its own name, and
+**Save** hides each one in every file that still has it. If the project has no
+secrets file yet, you're asked to pick one (it's only read; the values are
+written to this project's secrets file when you save). Numbers, `True`/
+`False`, names built from other names and very short strings are skipped,
+because swapping those everywhere would change what the code does.
+
 ### Picking up where you left off
 
 The app remembers the files you open. Next time you start it, it reopens the

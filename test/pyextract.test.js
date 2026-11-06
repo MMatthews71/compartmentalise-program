@@ -426,3 +426,51 @@ test('a variable renamed in the secrets file is renamed in every file that impor
     assert.deepStrictEqual(run({ ...files, ...after, 'pipeline.py': out.code, 'hidden_secrets.py': out.moduleText }), before);
   }
 });
+
+test('the values in a secrets file can be reused as secrets', () => {
+  const { moduleSecrets } = require('../pyextract.js');
+  const { secrets, skipped } = moduleSecrets(
+    [
+      '# header',
+      'import os',
+      'API_KEY = "sk-live-abcdef"  # prod',
+      "HOST = 'db.acme.internal'",
+      'PORT = 5432',
+      'DEBUG = True',
+      'CODES = MONTH_CODES',
+      'MONTH_CODES = {',
+      '    "jan": "ts_hk",',
+      '}',
+      'LOOKUP = dict(zip(range(3), MONTH_CODES))',
+      'TOKEN = os.environ["TOKEN"]',
+      'URL = f"https://{HOST}/x"',
+      'SHORT = "id"',
+      'COLS = ["ts_hk", "active_USD"]',
+      ''
+    ].join('\n')
+  );
+  assert.deepStrictEqual(secrets, [
+    { name: 'API_KEY', value: 'sk-live-abcdef' },
+    { name: 'HOST', value: 'db.acme.internal' },
+    { name: 'MONTH_CODES', value: '{\n    "jan": "ts_hk",\n}' },
+    { name: 'COLS', value: '["ts_hk", "active_USD"]' }
+  ]);
+  assert.strictEqual(skipped, 7);
+});
+
+test('a second file reuses the names already in the secrets file', (t) => {
+  const first = extract('KEY = "sk-live-abcdef"\nHOST = "db.acme.internal"\n', secretsOf(['sk-live-abcdef', 'API_KEY'], ['db.acme.internal', 'DB_HOST']));
+  // Another file with the same values, one of them in its own copy of API_KEY.
+  const src = 'API_KEY = "sk-live-abcdef"\nurl = "https://db.acme.internal/v1"\nheaders = {"k": API_KEY}\n';
+  const secrets = secretsOf(['sk-live-abcdef', 'API_KEY'], ['db.acme.internal', 'DB_HOST']).concat({ id: 99, value: 'API_KEY', name: 'API_KEY' });
+  const out = extract(src, secrets, { existingModule: first.moduleText, fileName: 'other.py' });
+  assert.strictEqual(out.added, 0, out.moduleText);
+  assert.strictEqual(out.moduleText, first.moduleText);
+  assert.match(out.code, /^from hidden_secrets import (API_KEY, DB_HOST|DB_HOST, API_KEY)\n/);
+  assert.doesNotMatch(out.code, /sk-live|acme/);
+  if (python) {
+    const [before, after] = runBoth(src, { code: out.code, moduleText: out.moduleText });
+    for (const k of Object.keys(after)) if (!(k in before)) delete after[k];
+    assert.deepStrictEqual(after, before);
+  } else t.diagnostic('python not found — skipped running the code');
+});
