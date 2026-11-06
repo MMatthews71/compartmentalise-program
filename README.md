@@ -27,6 +27,43 @@ Shortcuts:
   (API keys, tokens, emails, IPs, `password = "…"` assignments, JWTs, URLs with
   credentials) and adds them for you. Always review what it finds.
 
+**Folder mode** — hide terms across a whole project
+
+1. Click **Open folder…** and pick your project folder.
+2. Click any file, select a term (an API key, a company name, a module name…)
+   and press **Ctrl/Cmd + E** (or **Hide selection**). The term is hidden in
+   **every** text file in the folder — `.py`, `.json`, `.ipynb`, `.js`, `.yaml`,
+   `.env`, `.md` and so on — and in file and folder names too. The file list
+   shows how many hits each file has; **Safe copy** shows a file as the AI
+   will see it.
+3. Click **Export safe copy…**. The app writes a copy of the whole folder with
+   every hidden term swapped for its placeholder. Your original files are not
+   changed. Because the same term becomes the same placeholder everywhere,
+   imports, config keys and lookups still line up, so the safe copy works the
+   same way the original does.
+4. Give the safe copy to the AI. When it's done, click **Restore AI's
+   folder…**, pick its edited copy, then choose where to write the result. You
+   can pick your original project folder to apply the AI's changes directly
+   onto it.
+
+The real values are saved in `compartmentalise-secrets/secrets.json` inside your
+project. That folder is never included in a safe copy, and it holds its own
+`.gitignore`, so git ignores it without you editing yours. When you open the
+folder again, the same terms are hidden automatically.
+
+Details:
+- **JSON files** are handled properly. Values stored with escapes (quotes,
+  backslashes) are still found, and placeholders are written so the file stays
+  valid JSON. Before exporting, the app warns you if a file would stop being
+  valid JSON. For example, a hidden number such as a port would become text.
+- Keep placeholders as plain names (letters, digits, `_`, like the default
+  `__SECRET_1__`). Then a hidden term that is a variable, module or key name
+  still works as code.
+- Files the app can't scan (images, binaries, files over 2 MB, non-UTF-8 text)
+  are copied unchanged, and the app tells you how many there are.
+- `.git`, `node_modules`, `__pycache__`, `venv`/`.venv` and similar folders are
+  left out. Git history still holds every old secret.
+
 **Restore mode**
 
 Paste the AI's reply (placeholders and all) into the left box and your real
@@ -35,9 +72,12 @@ remembers your secret list.
 
 ## Privacy
 
-- Secrets live **only in the app window's memory**. Nothing is written to disk
-  and nothing is sent over the network — the app has no network access at all.
-- Closing the app forgets every secret.
+- Nothing is ever sent over the network. The app has no network access at all.
+- In Sanitise mode, secrets live **only in the app window's memory**. Closing
+  the app forgets them.
+- In Folder mode, secrets are saved only to
+  `<your project>/compartmentalise-secrets/secrets.json` (git-ignored). Keep
+  that folder private. Delete it to forget the secrets.
 
 ## Running it
 

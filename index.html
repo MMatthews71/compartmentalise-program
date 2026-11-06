@@ -23,6 +23,9 @@
         <button id="tab-sanitise" class="mode-btn active" role="tab" aria-selected="true">
           Sanitise
         </button>
+        <button id="tab-folder" class="mode-btn" role="tab" aria-selected="false">
+          Folder
+        </button>
         <button id="tab-restore" class="mode-btn" role="tab" aria-selected="false">
           Restore
         </button>
@@ -59,29 +62,49 @@
             <textarea id="output" class="code" spellcheck="false" readonly></textarea>
           </div>
         </div>
+      </section>
 
-        <!-- Secrets -->
-        <div class="panel secrets-panel">
-          <div class="panel-head">
-            <h2>2 · Secrets to hide</h2>
-            <div class="panel-actions">
-              <button id="add-secret-btn" class="btn ghost">+ Add secret</button>
-              <button id="clear-secrets-btn" class="btn ghost danger">Clear all</button>
-            </div>
+      <!-- ============ FOLDER MODE ============ -->
+      <section id="view-folder" class="view hidden">
+        <div class="panel folder-bar">
+          <div class="folder-info">
+            <h2 id="folder-name">No folder open</h2>
+            <span id="folder-stats" class="folder-stats">Open a project folder. Hide a term in any file and it is hidden in every file.</span>
           </div>
-          <div class="secrets-table-wrap">
-            <div class="secrets-head-row">
-              <span class="col-secret">Secret value</span>
-              <span class="col-ph">Placeholder</span>
-              <span class="col-hits">Hits</span>
-              <span class="col-del"></span>
-            </div>
-            <div id="secrets-list"></div>
+          <div class="panel-actions">
+            <button id="open-folder-btn" class="btn primary">Open folder…</button>
+            <button id="folder-detect-btn" class="btn ghost" disabled title="Scan every file for things that look like secrets">Auto-detect</button>
+            <button id="export-folder-btn" class="btn primary" disabled title="Write a copy of the whole folder with every secret replaced">Export safe copy…</button>
+            <button id="restore-folder-btn" class="btn ghost" disabled title="Put the real values back into a folder the AI edited">Restore AI's folder…</button>
           </div>
-          <p class="privacy-note">
-            🔒 Secrets live only in this window's memory. Nothing is written to disk or sent anywhere. Closing the app forgets them.
-          </p>
         </div>
+
+        <div class="folder-columns">
+          <div class="panel file-panel">
+            <div class="panel-head">
+              <h2>Files</h2>
+              <label class="check"><input type="checkbox" id="hits-only" /> only with hits</label>
+            </div>
+            <input id="file-filter" class="file-filter" type="text" placeholder="Filter files…" spellcheck="false" />
+            <div id="file-list" class="file-list"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2 id="viewer-title" class="viewer-title">Select a file</h2>
+              <div class="panel-actions">
+                <span id="viewer-count" class="count"></span>
+                <div class="seg" role="tablist" aria-label="View">
+                  <button id="view-original" class="seg-btn active">Original</button>
+                  <button id="view-safe" class="seg-btn">Safe copy</button>
+                </div>
+                <button id="hide-selection-btn" class="btn ghost" title="Select text in the file, then click (or press Ctrl/Cmd+E)">Hide selection</button>
+              </div>
+            </div>
+            <textarea id="file-view" class="code" spellcheck="false" readonly></textarea>
+          </div>
+        </div>
+        <p id="folder-note" class="privacy-note hidden"></p>
       </section>
 
       <!-- ============ RESTORE MODE ============ -->
@@ -107,10 +130,32 @@
         </div>
         <p id="restore-empty-note" class="privacy-note"></p>
       </section>
+
+      <!-- Secrets -->
+      <div id="secrets-panel" class="panel secrets-panel">
+        <div class="panel-head">
+          <h2 id="secrets-title">2 · Secrets to hide</h2>
+          <div class="panel-actions">
+            <button id="add-secret-btn" class="btn ghost">+ Add secret</button>
+            <button id="clear-secrets-btn" class="btn ghost danger">Clear all</button>
+          </div>
+        </div>
+        <div class="secrets-table-wrap">
+          <div class="secrets-head-row">
+            <span class="col-secret">Secret value</span>
+            <span class="col-ph">Placeholder</span>
+            <span class="col-hits">Hits</span>
+            <span class="col-del"></span>
+          </div>
+          <div id="secrets-list"></div>
+        </div>
+        <p id="privacy-note" class="privacy-note"></p>
+      </div>
     </main>
 
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
+    <script src="core.js"></script>
     <script src="renderer.js"></script>
   </body>
 </html>
